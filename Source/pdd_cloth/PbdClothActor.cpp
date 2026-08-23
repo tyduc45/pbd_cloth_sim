@@ -2,6 +2,8 @@
 
 
 #include "PbdClothActor.h"
+#include "Kismet/GameplayStatics.h"
+#include "GameFramework/PlayerController.h"
 
 // Sets default values
 APbdClothActor::APbdClothActor()
@@ -15,6 +17,24 @@ APbdClothActor::APbdClothActor()
 void APbdClothActor::BeginPlay()
 {
 	Super::BeginPlay();
+
+	if (APlayerController* PlayerController = UGameplayStatics::GetPlayerController(this, 0))
+	{
+		FVector CameraLocation;
+		FRotator CameraRotation;
+		PlayerController->GetPlayerViewPoint(CameraLocation, CameraRotation);
+
+		const FVector CameraForward = CameraRotation.Vector();
+		const FVector CameraUp = CameraRotation.RotateVector(FVector::UpVector);
+		const FVector GridCenter = CameraLocation + CameraForward * 100.0f;
+
+		// ç½‘æ ¼ä½äºå±€éƒ¨ XZ å¹³é¢ï¼Œå› æ­¤è®©å±€éƒ¨ +Y æœå‘ç›¸æœºã€‚
+		const FRotator GridRotation =
+			FRotationMatrix::MakeFromYZ(-CameraForward, CameraUp).Rotator();
+
+		SetActorLocationAndRotation(GridCenter, GridRotation);
+	}
+
 	Solver.InitializeGrid(NumX, NumY, Spacing);
 }
 
@@ -26,7 +46,7 @@ void APbdClothActor::Tick(float DeltaTime)
 	const TArray<FPBDTriangle>& triangles = Solver.GetTriangles();
 
 	const FTransform ActorTransform = GetActorTransform();
-	//Á£×Ó±¾µØ×ªÊÀ½ç×ø±ê
+	//ç²’å­æœ¬åœ°è½¬ä¸–ç•Œåæ ‡
 	auto GenWorldPosition = [&particles, &ActorTransform](int32 particleIndex) -> FVector
 		{
 			const FVector3f& LocalPosition = particles[particleIndex].Position;
@@ -38,10 +58,10 @@ void APbdClothActor::Tick(float DeltaTime)
 				)
 			);
 		};
-	// ¶ÔÓÚÃ¿Ò»¸öÈı½ÇĞÎ£¬¸ãµ½ËûÊÀ½ç×ø±êÖ®ºó£¬»­ÏßÁ¬ÆğÀ´
+	// å¯¹äºæ¯ä¸€ä¸ªä¸‰è§’å½¢ï¼Œæåˆ°ä»–ä¸–ç•Œåæ ‡ä¹‹åï¼Œç”»çº¿è¿èµ·æ¥
 	for (const auto& Triangle : triangles)
 	{
-		// ·ÀÖ¹´íÎóË÷Òıµ¼ÖÂ±ÀÀ£
+		// é˜²æ­¢é”™è¯¯ç´¢å¼•å¯¼è‡´å´©æºƒ
 		if (!particles.IsValidIndex(Triangle.Index1) ||
 			!particles.IsValidIndex(Triangle.Index2) ||
 			!particles.IsValidIndex(Triangle.Index3))
@@ -51,12 +71,12 @@ void APbdClothActor::Tick(float DeltaTime)
 		FVector World1 = GenWorldPosition(Triangle.Index1);
 		FVector World2 = GenWorldPosition(Triangle.Index2);
 		FVector World3 = GenWorldPosition(Triangle.Index3);
-		// false, 0.0f ±íÊ¾ÏßÌõ²»ÓÀ¾Ã±£´æ£¬Ö»ÏÔÊ¾µ±Ç°Ö¡¡£
+		// false, 0.0f è¡¨ç¤ºçº¿æ¡ä¸æ°¸ä¹…ä¿å­˜ï¼Œåªæ˜¾ç¤ºå½“å‰å¸§ã€‚
 		DrawDebugLine(GetWorld(), World1, World2, FColor::Cyan, false, 0.0f, 0, 1.5f);
 		DrawDebugLine(GetWorld(), World2, World3, FColor::Cyan, false, 0.0f, 0, 1.5f);
 		DrawDebugLine(GetWorld(), World1, World3, FColor::Cyan, false, 0.0f, 0, 1.5f);
 	}
-	// »æÖÆÁ£×Ó£¨¶¥µã£©
+	// ç»˜åˆ¶ç²’å­ï¼ˆé¡¶ç‚¹ï¼‰
 	for (const auto& Particle : particles)
 	{
 		const FVector3f& LocalPosition = Particle.Position;
@@ -68,7 +88,7 @@ void APbdClothActor::Tick(float DeltaTime)
 					LocalPosition.Z
 				)
 			);
-		// Çø·Ö¹Ì¶¨µãÒÔ¼°¶¯µã
+		// åŒºåˆ†å›ºå®šç‚¹ä»¥åŠåŠ¨ç‚¹
 		const FColor PointColor =
 			Particle.InvMass == 0.0f
 			? FColor::Red

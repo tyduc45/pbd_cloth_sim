@@ -10,13 +10,15 @@ void FPBDClothSolver::InitializeGrid(
 	Triangles.Reset();
 	DistanceConstraints.Reset();
 	Particles.Reserve(NumX * NumY);
+	const float HalfWidth = (NumX - 1) * Spacing * 0.5f;
+	const float HalfHeight = (NumY - 1) * Spacing * 0.5f;
 	// 设置粒子初始位置
 	for (int row = 0; row < NumY; row++)
 	{
 		for (int col = 0; col < NumX; col++)
 		{
-			float X = col * Spacing;
-			float Z = -row * Spacing;
+			const float X = col * Spacing - HalfWidth;
+			const float Z = HalfHeight - row * Spacing;
 			FVector3f pos = FVector3f(X, 0, Z);
 			FPBDParticle particle(pos, 1.0f);
 			if (row == 0 && (col == 0 || col == NumX - 1))
