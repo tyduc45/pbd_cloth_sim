@@ -2,12 +2,15 @@
 
 
 #include "PbdClothActor.h"
+#include "Components/SceneComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "GameFramework/PlayerController.h"
 
 // Sets default values
 APbdClothActor::APbdClothActor()
 {
+	RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("SceneRoot"));
+
  	// Set this actor to call Tick() every frame.  You can turn this off to improve performance if you don't need it.
 	PrimaryActorTick.bCanEverTick = true;
 
@@ -93,7 +96,7 @@ void APbdClothActor::Tick(float DeltaTime)
 			Particle.InvMass == 0.0f
 			? FColor::Red
 			: FColor::White;
-		DrawDebugPoint(GetWorld(), WorldPosition, 8.0f, PointColor, false, 0.0f, 0);
+		DrawDebugPoint(GetWorld(), WorldPosition, 30.0f, PointColor, false, 0.0f, 0);
 	}
 }
 
