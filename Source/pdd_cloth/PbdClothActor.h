@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "PBDClothSolver.h"
+#include "DrawDebugHelpers.h"
 #include "PbdClothActor.generated.h"
 
 UCLASS()

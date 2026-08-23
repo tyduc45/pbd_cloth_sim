@@ -5,21 +5,23 @@
 class FPBDClothSolver
 {
 public:
-	// ³õÊ¼»¯Íø¸ñ
+	// åˆå§‹åŒ–ç½‘æ ¼
 	void InitializeGrid(int32 NumX, int32 NumY, float Spacing);
-	// µü´ú
+	// è¿­ä»£
 	void Step(float DeltaTime);
 	void Reset();
 
 	const TArray<FPBDParticle>& GetParticles() const;
+	const TArray<FPBDTriangle>& GetTriangles() const;
 	const TArray<FPBDConstraint>& GetConstraint() const;
 
 private:
-	// ¼ÆËãÊ±¼ä»ı·Ö
+	// è®¡ç®—æ—¶é—´ç§¯åˆ†
 	void Integreate(float DeltaTime);
 	void SolveDistanceConstraints();
 	void UpdateVelocities(float DeltaTime);
 
 	TArray<FPBDParticle> Particles;
+	TArray<FPBDTriangle> Triangles;
 	TArray<FPBDConstraint> DistanceConstraints;
 };

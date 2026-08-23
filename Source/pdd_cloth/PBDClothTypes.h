@@ -12,6 +12,13 @@ struct FPBDParticle
 	
 };
 
+struct FPBDTriangle
+{
+	int32 Index1 = INDEX_NONE;
+	int32 Index2 = INDEX_NONE;
+	int32 Index3 = INDEX_NONE;
+};
+
 struct FPBDConstraint
 {
 	int32 pA = INDEX_NONE;

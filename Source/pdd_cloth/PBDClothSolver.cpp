@@ -7,9 +7,10 @@ void FPBDClothSolver::InitializeGrid(
 	float Spacing)
 {
 	Particles.Reset();
+	Triangles.Reset();
 	DistanceConstraints.Reset();
 	Particles.Reserve(NumX * NumY);
-	// ÉèÖÃÁ£×Ó³õÊ¼Î»ÖÃ
+	// è®¾ç½®ç²’å­åˆå§‹ä½ç½®
 	for (int row = 0; row < NumY; row++)
 	{
 		for (int col = 0; col < NumX; col++)
@@ -25,7 +26,7 @@ void FPBDClothSolver::InitializeGrid(
 			Particles.Add(particle);
 		}
 	}
-	// ´æ´¢Á£×ÓË÷Òı
+	// å­˜å‚¨ç²’å­ç´¢å¼•
 	const int32 ExpectedConstraintCount =
 		(NumX - 1) * NumY +
 		NumX * (NumY - 1);
@@ -37,7 +38,7 @@ void FPBDClothSolver::InitializeGrid(
 		{
 			const int32 CurrentIndex = row * NumX + col;
 			int32 NeightborIndex;
-			//½¨Á¢ CurrentIndex µ½ CurrentIndex + 1 µÄË®Æ½Ô¼Êø
+			//å»ºç«‹ CurrentIndex åˆ° CurrentIndex + 1 çš„æ°´å¹³çº¦æŸ
 			if (col + 1 < NumX)
 			{
 				FPBDConstraint HorizontalConstraint;
@@ -47,7 +48,7 @@ void FPBDClothSolver::InitializeGrid(
 				HorizontalConstraint.restLength = Spacing;
 				DistanceConstraints.Add(HorizontalConstraint);
 			}
-			//½¨Á¢ CurrentIndex µ½ CurrentIndex + NumX µÄ´¹Ö±Ô¼Êø
+			//å»ºç«‹ CurrentIndex åˆ° CurrentIndex + NumX çš„å‚ç›´çº¦æŸ
 			if (row + 1 < NumY)
 			{
 				FPBDConstraint VerticalConstraint;
@@ -59,11 +60,53 @@ void FPBDClothSolver::InitializeGrid(
 			}
 		}
 	}
+	const int32 ExpectedTriangleCount = 2 * (NumX - 1) * (NumY - 1);
+	Triangles.Reserve(ExpectedTriangleCount);
+	// åˆå§‹åŒ–ä¸‰è§’å½¢ , ä¸Šä¸‹ä¸‰è§’å½¢, é¡ºåº ï¼Œé¡ºæ—¶é’ˆ
+	for (int32 row = 0; row < NumY - 1; row++)
+	{
+		for (int32 col = 0; col < NumX - 1; col++)
+		{
+			const int32 A = row * NumX + col;
+			const int32 B = A + 1;
+			const int32 C = A + NumX;
+			const int32 D = C + 1;
+			FPBDTriangle TriABC; FPBDTriangle TriBDC;
+			TriABC.Index1 = A;		 TriBDC.Index1 = B;
+			TriABC.Index2 = B;		 TriBDC.Index2 = D;
+			TriABC.Index3 = C;		 TriBDC.Index3 = C;
+			Triangles.Add(TriABC);
+			Triangles.Add(TriBDC);
+		}
+	}
 	UE_LOG(
 		LogTemp,
 		Display,
-		TEXT("PBD grid initialized: %d particles, %d constraints"),
+		TEXT("PBD grid initialized: %d particles, %d constraints, %d triangles"),
 		Particles.Num(),
-		DistanceConstraints.Num()
+		DistanceConstraints.Num(),
+		Triangles.Num()
 	);
+}
+
+void FPBDClothSolver::Reset()
+{
+	Particles.Reset();
+	Triangles.Reset();
+	DistanceConstraints.Reset();
+}
+
+const TArray<FPBDParticle>& FPBDClothSolver::GetParticles() const
+{
+	return Particles;
+}
+
+const TArray<FPBDTriangle>& FPBDClothSolver::GetTriangles() const
+{
+	return Triangles;
+}
+
+const TArray<FPBDConstraint>& FPBDClothSolver::GetConstraint() const
+{
+	return DistanceConstraints;
 }
