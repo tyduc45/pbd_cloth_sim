@@ -98,5 +98,6 @@ void APbdClothActor::Tick(float DeltaTime)
 			: FColor::White;
 		DrawDebugPoint(GetWorld(), WorldPosition, 30.0f, PointColor, false, 0.0f, 0);
 	}
+	Solver.Step(FixedDeltaTime, SolverIterations);
 }
 

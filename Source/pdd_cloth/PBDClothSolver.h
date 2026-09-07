@@ -1,27 +1,48 @@
 #pragma once
 
 #include "PBDClothTypes.h"
+#include "PBDConstraintBatch.h"
+#include "PBDDistanceConstraintBatch.h"
 
 class FPBDClothSolver
 {
 public:
-	// 初始化网格
-	void InitializeGrid(int32 NumX, int32 NumY, float Spacing);
-	// 迭代
-	void Step(float DeltaTime);
-	void Reset();
+    void InitializeGrid(
+        int32 NumX,
+        int32 NumY,
+        float Spacing);
 
-	const TArray<FPBDParticle>& GetParticles() const;
-	const TArray<FPBDTriangle>& GetTriangles() const;
-	const TArray<FPBDConstraint>& GetConstraint() const;
+    void Step(
+        float DeltaTime,
+        int32 SolverIterations);
+
+    void Reset();
+
+    // 外部新增约束类型时统一通过该接口注册。
+    void RegisterConstraintBatch(
+        TUniquePtr<IPBDConstraintBatch> Batch);
+
+    const TArray<FPBDParticle>& GetParticles() const;
+    const TArray<FPBDTriangle>& GetTriangles() const;
+
+    const TArray<FPBDDistanceConstraint>&
+        GetDistanceConstraints() const;
 
 private:
-	// 计算时间积分
-	void Integreate(float DeltaTime);
-	void SolveDistanceConstraints();
-	void UpdateVelocities(float DeltaTime);
+    void Integrate(float DeltaTime);
+    void UpdateVelocities(float DeltaTime);
 
-	TArray<FPBDParticle> Particles;
-	TArray<FPBDTriangle> Triangles;
-	TArray<FPBDConstraint> DistanceConstraints;
+    TArray<FPBDParticle> Particles;
+    TArray<FPBDTriangle> Triangles;
+
+    // 负责所有约束批次的生命周期。
+    TArray<TUniquePtr<IPBDConstraintBatch>>
+        ConstraintBatches;
+
+    // 非拥有指针；实际对象由 ConstraintBatches 持有。
+    FPBDDistanceConstraintBatch*
+        DistanceConstraintBatch = nullptr;
+
+    FVector3f Gravity =
+        FVector3f(0.0f, 0.0f, -980.0f);
 };
