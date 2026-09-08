@@ -8,6 +8,7 @@ struct FPBDBendConstraint
 	int32 Particle2 = INDEX_NONE;
 	int32 Particle3 = INDEX_NONE;
 	int32 Particle4 = INDEX_NONE;
+	// Signed rest angle in radians (Chaos convention: flat = 0).
 	float theta = 0.0f;
 	// 0 表示完全刚性；数值越大，约束越柔软。
 	float Compliance = 0.0f;

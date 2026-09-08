@@ -179,18 +179,23 @@ void FPBDClothSolver::InitializeGrid(
         const FVector3f U = Particles[P3].Position - Particles[P1].Position;
         const FVector3f V = Particles[P4].Position - Particles[P1].Position;
         const FVector3f Cross1 = FVector3f::CrossProduct(E, U);
-        const FVector3f Cross2 = FVector3f::CrossProduct(E, V);
+        const FVector3f Cross2 = FVector3f::CrossProduct(V, E);
         const float A = Cross1.Size();
         const float B = Cross2.Size();
-        if (A <= UE_SMALL_NUMBER || B <= UE_SMALL_NUMBER)
+        const float EdgeLength = E.Size();
+        if (!FMath::IsFinite(A) || !FMath::IsFinite(B) || !FMath::IsFinite(EdgeLength) ||
+            A <= UE_SMALL_NUMBER || B <= UE_SMALL_NUMBER || EdgeLength <= UE_SMALL_NUMBER)
         {
             continue;
         }
 
-        // Match Solve's unsigned acos convention: a flat hinge has angle PI.
-        const float CosTheta = FMath::Clamp(
-            FVector3f::DotProduct(Cross1 / A, Cross2 / B), -1.0f, 1.0f);
-        NewBendBatch->AddConstraint(P1, P2, P3, P4, FMath::Acos(CosTheta));
+        // Match Solve's signed atan2 convention: a flat hinge has angle zero.
+        const FVector3f N1 = Cross1 / A;
+        const FVector3f N2 = Cross2 / B;
+        const float CosTheta = FMath::Clamp(FVector3f::DotProduct(N1, N2), -1.0f, 1.0f);
+        const float SinTheta = FMath::Clamp(FVector3f::DotProduct(
+            FVector3f::CrossProduct(N2, N1), E / EdgeLength), -1.0f, 1.0f);
+        NewBendBatch->AddConstraint(P1, P2, P3, P4, FMath::Atan2(SinTheta, CosTheta));
     }
 
     const int32 BendConstraintCount = NewBendBatch->GetConstraints().Num();

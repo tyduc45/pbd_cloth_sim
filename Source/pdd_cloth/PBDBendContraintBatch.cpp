@@ -15,6 +15,14 @@ static TAutoConsoleVariable<int32> CVarPBDBendDebugBreak(
     TEXT("Break before an anomalous correction if a debugger is attached."));
 
 
+// Chaos-style division: a near-zero denominator produces zero, not FMath's maximum value.
+template<typename T>
+static T SafeDivide(const T& Numerator, float Denominator)
+{
+    return FMath::IsFinite(Denominator) && Denominator > UE_SMALL_NUMBER
+        ? Numerator / Denominator : T(0);
+}
+
 FName FPBDBendConstraintBatch::GetDebugName() const
 {
     static const FName Name(TEXT("Bend"));
@@ -63,36 +71,40 @@ void FPBDBendConstraintBatch::Solve(
         const FVector3f V = P4.PredictedPosition - P1.PredictedPosition;
 
         const FVector3f Cross1 = FVector3f::CrossProduct(E, U);
-        const FVector3f Cross2 = FVector3f::CrossProduct(E, V);
-
-        float A = Cross1.Size();
-        float B = Cross2.Size();
-
-        if (A <= UE_SMALL_NUMBER || B <= UE_SMALL_NUMBER)
+        const FVector3f Cross2 = FVector3f::CrossProduct(V, E);
+        const float A = Cross1.Size();
+        const float B = Cross2.Size();
+        const float EdgeLength = E.Size();
+        if (!FMath::IsFinite(A) || !FMath::IsFinite(B) || !FMath::IsFinite(EdgeLength) ||
+            A <= UE_SMALL_NUMBER || B <= UE_SMALL_NUMBER || EdgeLength <= UE_SMALL_NUMBER)
         {
+            const int32 DebugMode = CVarPBDBendDebug.GetValueOnGameThread();
+            if (DebugMode > 0 && (DebugMode >= 2 || !bHasReportedDebugAnomaly))
+            {
+                bHasReportedDebugAnomaly = true;
+                UE_LOG(LogPBDBendDebug, Warning,
+                    TEXT("SKIP invalid hinge Iteration=%d Indices=(%d,%d,%d,%d) A=%.9g B=%.9g Edge=%.9g"),
+                    Context.Iteration, Constraint.Particle1, Constraint.Particle2,
+                    Constraint.Particle3, Constraint.Particle4, A, B, EdgeLength);
+            }
             continue;
         }
 
-        FVector3f N1 = Cross1 / A;
-        FVector3f N2 = Cross2 / B;
-
+        const FVector3f N1 = SafeDivide(Cross1, A);
+        const FVector3f N2 = SafeDivide(Cross2, B);
+        const FVector3f EdgeDirection = SafeDivide(E, EdgeLength);
         const float CosTheta = FMath::Clamp(FVector3f::DotProduct(N1, N2), -1.0f, 1.0f);
-        const float SinTheta = FMath::Sqrt(FMath::Max(0.0f, 1.0f - CosTheta * CosTheta));
-        // The unsigned acos gradient is undefined at a flat or fully folded hinge.
-        if (SinTheta <= UE_SMALL_NUMBER)
-        {
-            continue;
-        }
+        const float SinTheta = FMath::Clamp(FVector3f::DotProduct(
+            FVector3f::CrossProduct(N2, N1), EdgeDirection), -1.0f, 1.0f);
+        const float Angle = FMath::Atan2(SinTheta, CosTheta);
 
-        // 将重复的链式求导部分提出来。
-        const FVector3f T1 = (N2 - CosTheta * N1) / A;
-        const FVector3f T2 = (N1 - CosTheta * N2) / B;
-        // 求解约束的梯度
-        const FVector3f Grad3 = -FVector3f::CrossProduct(T1, E) / SinTheta;
-        const FVector3f Grad4 = -FVector3f::CrossProduct(T2, E) / SinTheta;
-        const FVector3f Grad2 = -(FVector3f::CrossProduct(U, T1) + FVector3f::CrossProduct(V, T2)) / SinTheta;
+        // atan2 chain rule. T1/T2 are derivatives with respect to the unit normals.
+        const FVector3f T1 = CosTheta * FVector3f::CrossProduct(EdgeDirection, N2) - SinTheta * N2;
+        const FVector3f T2 = CosTheta * FVector3f::CrossProduct(N1, EdgeDirection) - SinTheta * N1;
+        const FVector3f Grad3 = SafeDivide(FVector3f::CrossProduct(T1, E), A);
+        const FVector3f Grad4 = SafeDivide(FVector3f::CrossProduct(E, T2), B);
+        const FVector3f Grad2 = SafeDivide(FVector3f::CrossProduct(U, T1), A) + SafeDivide(FVector3f::CrossProduct(T2, V), B);
         const FVector3f Grad1 = -Grad2 - Grad3 - Grad4;
-        // 求分母上的二次型
         const float WeightSum =
             P1.InvMass * Grad1.SizeSquared() +
             P2.InvMass * Grad2.SizeSquared() +
@@ -101,13 +113,13 @@ void FPBDBendConstraintBatch::Solve(
         // 计算分母和分子
         float Alpha = Constraint.Compliance / DeltaTimeSquared;
         const float Denominator = WeightSum + Alpha;
-        float ConstraintError = FMath::Acos(CosTheta) - Constraint.theta;
+        float ConstraintError = Angle - Constraint.theta;
         if (Denominator <= 0.0f)
         {
             continue;
         }
         // 计算delta lambda 并更新 x
-        const float DeltaLambda = (-ConstraintError - Alpha * Constraint.Lambda) / Denominator;
+        const float DeltaLambda = SafeDivide(-ConstraintError - Alpha * Constraint.Lambda, Denominator);
         const FVector3f DeltaP1 = P1.InvMass * DeltaLambda * Grad1;
         const FVector3f DeltaP2 = P2.InvMass * DeltaLambda * Grad2;
         const FVector3f DeltaP3 = P3.InvMass * DeltaLambda * Grad3;
@@ -152,7 +164,7 @@ void FPBDBendConstraintBatch::Solve(
                     Context.DeltaTime, !bFinite, MaxCorrection, Threshold);
                 UE_LOG(LogPBDBendDebug, Warning,
                     TEXT("A=%.9g B=%.9g Cos=%.9g Sin=%.9g Angle=%.9g RestAngle=%.9g C=%.9g WeightSum=%.9g Alpha=%.9g Denom=%.9g LambdaBefore=%.9g DeltaLambda=%.9g"),
-                    A, B, CosTheta, SinTheta, FMath::Acos(CosTheta), Constraint.theta,
+                    A, B, CosTheta, SinTheta, Angle, Constraint.theta,
                     ConstraintError, WeightSum, Alpha, Denominator, Constraint.Lambda, DeltaLambda);
                 for (int32 I = 0; I < 4; ++I)
                 {
