@@ -1,4 +1,5 @@
 #include "PBDClothSolver.h"
+#include "PBDBendConstraintBatch.h"
 
 void FPBDClothSolver::InitializeGrid(
     int32 NumX,
@@ -119,18 +120,91 @@ void FPBDClothSolver::InitializeGrid(
         }
     }
 
+    // Each interior edge contributes one hinge: two edge endpoints and
+    // the opposite vertex from each of its two triangles.
+    TUniquePtr<FPBDBendConstraintBatch> NewBendBatch =
+        MakeUnique<FPBDBendConstraintBatch>();
+    NewBendBatch->Reserve(Triangles.Num() * 3 / 2);
+
+    struct FEdgeNeighbors
+    {
+        int32 Opposite1 = INDEX_NONE;
+        int32 Opposite2 = INDEX_NONE;
+        int32 TriangleCount = 0;
+    };
+
+    TMap<TPair<int32, int32>, FEdgeNeighbors> EdgeNeighbors;
+    const auto AddEdge = [&EdgeNeighbors](int32 A, int32 B, int32 Opposite)
+    {
+        const TPair<int32, int32> Key(FMath::Min(A, B), FMath::Max(A, B));
+        FEdgeNeighbors& Neighbors = EdgeNeighbors.FindOrAdd(Key);
+        if (Neighbors.TriangleCount == 0)
+        {
+            Neighbors.Opposite1 = Opposite;
+        }
+        else if (Neighbors.TriangleCount == 1)
+        {
+            Neighbors.Opposite2 = Opposite;
+        }
+        ++Neighbors.TriangleCount;
+    };
+
+    for (const FPBDTriangle& Triangle : Triangles)
+    {
+        AddEdge(Triangle.Index1, Triangle.Index2, Triangle.Index3);
+        AddEdge(Triangle.Index2, Triangle.Index3, Triangle.Index1);
+        AddEdge(Triangle.Index3, Triangle.Index1, Triangle.Index2);
+    }
+
+    for (const auto& Entry : EdgeNeighbors)
+    {
+        const FEdgeNeighbors& Neighbors = Entry.Value;
+        // Boundary edges have no second face. Non-manifold edges need an
+        // explicit pairing policy; they cannot occur in this regular grid.
+        if (Neighbors.TriangleCount != 2)
+        {
+            continue;
+        }
+
+        const int32 P1 = Entry.Key.Key;
+        const int32 P2 = Entry.Key.Value;
+        const int32 P3 = Neighbors.Opposite1;
+        const int32 P4 = Neighbors.Opposite2;
+        const FVector3f E = Particles[P2].Position - Particles[P1].Position;
+        const FVector3f U = Particles[P3].Position - Particles[P1].Position;
+        const FVector3f V = Particles[P4].Position - Particles[P1].Position;
+        const FVector3f Cross1 = FVector3f::CrossProduct(E, U);
+        const FVector3f Cross2 = FVector3f::CrossProduct(E, V);
+        const float A = Cross1.Size();
+        const float B = Cross2.Size();
+        if (A <= UE_SMALL_NUMBER || B <= UE_SMALL_NUMBER)
+        {
+            continue;
+        }
+
+        // Match Solve's unsigned acos convention: a flat hinge has angle PI.
+        const float CosTheta = FMath::Clamp(
+            FVector3f::DotProduct(Cross1 / A, Cross2 / B), -1.0f, 1.0f);
+        NewBendBatch->AddConstraint(P1, P2, P3, P4, FMath::Acos(CosTheta));
+    }
+
+    const int32 BendConstraintCount = NewBendBatch->GetConstraints().Num();
+    RegisterConstraintBatch(MoveTemp(NewBendBatch));
+
     UE_LOG(
         LogTemp,
         Display,
         TEXT(
             "PBD grid initialized: "
             "%d particles, "
-            "%d constraints, "
+            "%d distance constraints, "
+            "%d bend constraints, "
             "%d triangles"),
         Particles.Num(),
         DistanceConstraintBatch
         ->GetConstraints()
         .Num(),
+        BendConstraintCount,
         Triangles.Num());
 }
 
@@ -155,13 +229,13 @@ void FPBDClothSolver::Step(
     {
         Batch->PreStep(Context);
     }
-
+    // 进行多次迭代修正，在Integrate（）得出的的基础上（这是方程简化的重要条件）
     for (int32 Iteration = 0;
         Iteration < SolverIterations;
         ++Iteration)
     {
         Context.Iteration = Iteration;
-
+        //按顺序求解每一个constraint
         for (TUniquePtr<IPBDConstraintBatch>& Batch :
             ConstraintBatches)
         {
@@ -198,7 +272,7 @@ void FPBDClothSolver::RegisterConstraintBatch(
                 Right->GetSolvePriority();
         });
 }
-
+// 算出初始预测位置
 void FPBDClothSolver::Integrate(float DeltaTime)
 {
     for (FPBDParticle& Particle : Particles)
@@ -223,6 +297,7 @@ void FPBDClothSolver::Integrate(float DeltaTime)
     }
 }
 
+// 使用修正后的位置修正速度
 void FPBDClothSolver::UpdateVelocities(
     float DeltaTime)
 {

@@ -45,4 +45,6 @@ private:
 
     FVector3f Gravity =
         FVector3f(0.0f, 0.0f, -980.0f);
+    /*FVector3f Gravity =
+        FVector3f(0.0f, 0.0f, -0.0f);*/
 };
