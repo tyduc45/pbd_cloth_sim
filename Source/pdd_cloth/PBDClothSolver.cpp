@@ -1,5 +1,10 @@
 #include "PBDClothSolver.h"
 #include "PBDBendConstraintBatch.h"
+#include "HAL/IConsoleManager.h"
+
+static TAutoConsoleVariable<int32> CVarPBDStageDebug(
+    TEXT("p.PBD.StageDebug"), 0,
+    TEXT("Log integration displacement, each batch correction, and final speed on every step."));
 
 void FPBDClothSolver::InitializeGrid(
     int32 NumX,
@@ -218,7 +223,48 @@ void FPBDClothSolver::Step(
         return;
     }
 
+    const bool bDebugStages = CVarPBDStageDebug.GetValueOnGameThread() != 0;
+    TArray<FVector3f> BeforeBatch;
+    if (bDebugStages)
+    {
+        BeforeBatch.SetNumUninitialized(Particles.Num());
+    }
+    const auto LogStage = [&](const TCHAR* Stage, int32 Iteration, bool bVelocity, bool bBatchDelta)
+    {
+        double Maximum = 0.0;
+        int32 MaxParticle = INDEX_NONE;
+        int32 FirstNonFinite = INDEX_NONE;
+        int32 NonFiniteCount = 0;
+        for (int32 I = 0; I < Particles.Num(); ++I)
+        {
+            const FVector Value = bVelocity ? FVector(Particles[I].Velocity) :
+                FVector(Particles[I].PredictedPosition) -
+                FVector(bBatchDelta ? BeforeBatch[I] : Particles[I].Position);
+            if (Value.ContainsNaN())
+            {
+                if (FirstNonFinite == INDEX_NONE) { FirstNonFinite = I; }
+                ++NonFiniteCount;
+                continue;
+            }
+            const double Magnitude = Value.Size();
+            if (MaxParticle == INDEX_NONE || Magnitude > Maximum)
+            {
+                Maximum = Magnitude;
+                MaxParticle = I;
+            }
+        }
+        UE_LOG(LogTemp, Warning,
+            TEXT("[PBDStage] Solver=%p Frame=%llu Dt=%.9g Iteration=%d Stage=%s MaxFinite=%.9g %s Particle=%d NonFiniteCount=%d FirstNonFinite=%d"),
+            static_cast<const void*>(this), static_cast<unsigned long long>(GFrameCounter),
+            DeltaTime, Iteration, Stage, Maximum, bVelocity ? TEXT("cm/s") : TEXT("cm"),
+            MaxParticle, NonFiniteCount, FirstNonFinite);
+    };
+
     Integrate(DeltaTime);
+    if (bDebugStages)
+    {
+        LogStage(TEXT("Integrate"), INDEX_NONE, false, false);
+    }
 
     FPBDConstraintContext Context;
     Context.Particles = MakeArrayView(Particles);
@@ -239,7 +285,18 @@ void FPBDClothSolver::Step(
         for (TUniquePtr<IPBDConstraintBatch>& Batch :
             ConstraintBatches)
         {
+            if (bDebugStages)
+            {
+                for (int32 I = 0; I < Particles.Num(); ++I)
+                {
+                    BeforeBatch[I] = Particles[I].PredictedPosition;
+                }
+            }
             Batch->Solve(Context);
+            if (bDebugStages)
+            {
+                LogStage(*Batch->GetDebugName().ToString(), Iteration, false, true);
+            }
         }
     }
 
@@ -250,6 +307,10 @@ void FPBDClothSolver::Step(
     }
 
     UpdateVelocities(DeltaTime);
+    if (bDebugStages)
+    {
+        LogStage(TEXT("UpdateVelocities"), INDEX_NONE, true, false);
+    }
 }
 
 void FPBDClothSolver::RegisterConstraintBatch(
