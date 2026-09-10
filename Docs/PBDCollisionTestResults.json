@@ -1,0 +1,43 @@
+{
+  "engine": "Unreal Engine 5.8.1",
+  "reportCreatedOn": "2026.09.09-11.35.10",
+  "validation": "Isolated project source snapshot, Win64 Development Editor, NullRHI",
+  "succeeded": 4,
+  "failed": 0,
+  "warnings": 0,
+  "tests": [
+    {
+      "fullTestPath": "PBD.Collision.ClothSolverIntegration",
+      "state": "Success",
+      "errors": 0,
+      "warnings": 0
+    },
+    {
+      "fullTestPath": "PBD.Collision.GeometryAgainstChaos",
+      "state": "Success",
+      "errors": 0,
+      "warnings": 0
+    },
+    {
+      "fullTestPath": "PBD.Collision.PhysicsAssetAdapter",
+      "state": "Success",
+      "errors": 0,
+      "warnings": 0
+    },
+    {
+      "fullTestPath": "PBD.Collision.ProjectionAndEdgeCases",
+      "state": "Success",
+      "errors": 0,
+      "warnings": 0
+    }
+  ],
+  "sourceSha256": {
+    "Source/pdd_cloth/PBDCollisionConstraintBatch.h": "e9a43b2fb4446fee1fd8be74f5ac1e9e14cb614152d68d777f8c1b2192dc039c",
+    "Source/pdd_cloth/PBDCollisionConstraintBatch.cpp": "fb194d38c75be883e15fd6452041b070668b1bf9187a35b107cd1f9995a91bba",
+    "Source/pdd_cloth/PBDPhysicsAssetAdapter.h": "1adb2478cdc39961769977a508138cf5f70f5da48d9f550bbf360b048eae5b56",
+    "Source/pdd_cloth/PBDPhysicsAssetAdapter.cpp": "22ab21ad1cb0979ffd858ed442100b79293244a6810ad2ef6065b4341d93d516",
+    "Source/pdd_cloth/Tests/PBDCollisionTests.cpp": "7e7fcc610e1a4330426fcd5095cdbc306f20234ceebfca338507617ab523d55a",
+    "Scripts/test_pbd_collision.py": "5771a261269d57027e2d3e2b5baf12cf813a7b296dd3a0df8ee78e4adbd8c561",
+    "Source/pdd_cloth/pdd_cloth.Build.cs": "411e2f9c41ba4b26db8040344794e488e4e664e5f72e65d62a953cf21e5e9a80"
+  }
+}

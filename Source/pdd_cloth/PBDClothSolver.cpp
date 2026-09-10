@@ -15,6 +15,7 @@ void FPBDClothSolver::InitializeGrid(
     Triangles.Reset();
     ConstraintBatches.Reset();
     DistanceConstraintBatch = nullptr;
+    BendConstraintBatch = nullptr;
 
     Particles.Reserve(NumX * NumY);
 
@@ -215,6 +216,7 @@ void FPBDClothSolver::InitializeGrid(
         NewBendBatch->AddConstraint(P1, P2, P3, P4, FMath::Atan2(SinTheta, CosTheta));
     }
 
+    BendConstraintBatch = NewBendBatch.Get();
     const int32 BendConstraintCount = NewBendBatch->GetConstraints().Num();
     RegisterConstraintBatch(MoveTemp(NewBendBatch));
 
@@ -416,6 +418,7 @@ void FPBDClothSolver::Reset()
     Triangles.Reset();
     ConstraintBatches.Reset();
     DistanceConstraintBatch = nullptr;
+    BendConstraintBatch = nullptr;
 }
 
 const TArray<FPBDParticle>&
@@ -439,4 +442,21 @@ FPBDClothSolver::GetDistanceConstraints() const
     return DistanceConstraintBatch
         ? DistanceConstraintBatch->GetConstraints()
         : EmptyConstraints;
+}
+
+void FPBDClothSolver::AddVelocity(const FVector3f& DeltaVelocity)
+{
+    for (FPBDParticle& Particle : Particles)
+    {
+        if (Particle.InvMass > 0.0f)
+        {
+            Particle.Velocity += DeltaVelocity;
+        }
+    }
+}
+
+const TArray<FPBDBendConstraint>& FPBDClothSolver::GetBendConstraints() const
+{
+    static const TArray<FPBDBendConstraint> EmptyConstraints;
+    return BendConstraintBatch ? BendConstraintBatch->GetConstraints() : EmptyConstraints;
 }

@@ -1,0 +1,662 @@
+diff --git a/Source/pdd_cloth/pdd_cloth.Build.cs b/Source/pdd_cloth/pdd_cloth.Build.cs
+index 3b0a128..a8098a9 100644
+--- a/Source/pdd_cloth/pdd_cloth.Build.cs
++++ b/Source/pdd_cloth/pdd_cloth.Build.cs
+@@ -10,7 +10,7 @@ public class pdd_cloth : ModuleRules
+ 	
+ 		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput" });
+ 
+-		PrivateDependencyModuleNames.AddRange(new string[] { "Chaos" });
++		PrivateDependencyModuleNames.AddRange(new string[] { "Chaos", "ChaosCore", "PhysicsCore" });
+ 
+ 		// Uncomment if you are using Slate UI
+ 		// PrivateDependencyModuleNames.AddRange(new string[] { "Slate", "SlateCore" });
+diff --git a/Source/pdd_cloth/PBDCollisionConstraintBatch.h b/Source/pdd_cloth/PBDCollisionConstraintBatch.h
+new file mode 100644
+index 0000000..821a349
+--- /dev/null
++++ b/Source/pdd_cloth/PBDCollisionConstraintBatch.h
+@@ -0,0 +1,44 @@
++#pragma once
++
++#include "PBDConstraintBatch.h"
++
++enum class EPBDColliderShape : uint8
++{
++    Sphere,
++    Cylinder,
++    Capsule
++};
++
++// Geometry is expressed in solver space, in cm. Rotation must be a unit quaternion.
++// Cylinder has flat caps; Capsule has hemispherical caps. Local axis is +Z.
++struct FPBDCollider
++{
++    EPBDColliderShape Shape = EPBDColliderShape::Sphere;
++    FVector3f Center = FVector3f::ZeroVector;
++    FQuat4f Rotation = FQuat4f::Identity;
++    float Radius = 1.0f;
++    // Cylinder: half cap-to-cap length. Capsule: half central segment length.
++    float HalfHeight = 0.0f;
++
++    // False means invalid geometry/input. Normal points out of the solid.
++    bool PhiWithNormal(const FVector3f& Position, float& Phi, FVector3f& Normal) const;
++};
++
++// Hard, unilateral contacts against kinematic geometry: C(P) = Phi(P) - Thickness >= 0.
++// Update the collider array before every solver substep. No UObject access during Solve.
++class FPBDCollisionConstraintBatch final : public IPBDConstraintBatch
++{
++public:
++    virtual FName GetDebugName() const override;
++    virtual int32 GetSolvePriority() const override { return 300; }
++    virtual void Solve(FPBDConstraintContext& Context) override;
++
++    void SetColliders(TArray<FPBDCollider> InColliders) { Colliders = MoveTemp(InColliders); }
++    const TArray<FPBDCollider>& GetColliders() const { return Colliders; }
++    void SetThickness(float InThickness);
++    float GetThickness() const { return Thickness; }
++
++private:
++    TArray<FPBDCollider> Colliders;
++    float Thickness = 0.0f;
++};
+diff --git a/Source/pdd_cloth/PBDCollisionConstraintBatch.cpp b/Source/pdd_cloth/PBDCollisionConstraintBatch.cpp
+new file mode 100644
+index 0000000..6243326
+--- /dev/null
++++ b/Source/pdd_cloth/PBDCollisionConstraintBatch.cpp
+@@ -0,0 +1,94 @@
++#include "PBDCollisionConstraintBatch.h"
++
++bool FPBDCollider::PhiWithNormal(const FVector3f& Position, float& Phi, FVector3f& Normal) const
++{
++    Phi = 0.0f;
++    Normal = FVector3f::ZeroVector;
++    if (Position.ContainsNaN() || Center.ContainsNaN() || Rotation.ContainsNaN() ||
++        !Rotation.IsNormalized() || !FMath::IsFinite(Radius) || Radius <= 0.0f ||
++        !FMath::IsFinite(HalfHeight) || HalfHeight < 0.0f)
++    {
++        return false;
++    }
++
++    const FVector3f Local = Rotation.UnrotateVector(Position - Center);
++    FVector3f LocalNormal;
++    switch (Shape)
++    {
++    case EPBDColliderShape::Sphere:
++    case EPBDColliderShape::Capsule:
++    {
++        const float SegmentZ = Shape == EPBDColliderShape::Capsule
++            ? FMath::Clamp(Local.Z, -HalfHeight, HalfHeight) : 0.0f;
++        const FVector3f Delta = Local - FVector3f(0.0f, 0.0f, SegmentZ);
++        const float Distance = Delta.Size();
++        Phi = Distance - Radius;
++        // The gradient is ambiguous at the center/segment. Choose a stable unit direction.
++        LocalNormal = Distance > UE_SMALL_NUMBER ? Delta / Distance : FVector3f(1, 0, 0);
++        break;
++    }
++    case EPBDColliderShape::Cylinder:
++    {
++        if (HalfHeight <= 0.0f)
++        {
++            return false;
++        }
++        const float Rho = FVector2f(Local.X, Local.Y).Size();
++        const FVector3f RadialNormal = Rho > UE_SMALL_NUMBER
++            ? FVector3f(Local.X / Rho, Local.Y / Rho, 0) : FVector3f(1, 0, 0);
++        const FVector3f CapNormal(0, 0, Local.Z >= 0.0f ? 1.0f : -1.0f);
++        const float SideDistance = Rho - Radius;
++        const float CapDistance = FMath::Abs(Local.Z) - HalfHeight;
++        const float OutsideSide = FMath::Max(SideDistance, 0.0f);
++        const float OutsideCap = FMath::Max(CapDistance, 0.0f);
++        const float OutsideDistance = FVector2f(OutsideSide, OutsideCap).Size();
++        Phi = OutsideDistance + FMath::Min(FMath::Max(SideDistance, CapDistance), 0.0f);
++        if (OutsideDistance > UE_SMALL_NUMBER)
++        {
++            // Outside a rim, the closest feature is the circular edge, not just a plane.
++            LocalNormal = (OutsideSide * RadialNormal + OutsideCap * CapNormal) / OutsideDistance;
++        }
++        else
++        {
++            LocalNormal = SideDistance >= CapDistance ? RadialNormal : CapNormal;
++        }
++        break;
++    }
++    default:
++        return false;
++    }
++
++    Normal = Rotation.RotateVector(LocalNormal);
++    return FMath::IsFinite(Phi) && !Normal.ContainsNaN();
++}
++
++FName FPBDCollisionConstraintBatch::GetDebugName() const
++{
++    static const FName Name(TEXT("Collision"));
++    return Name;
++}
++
++void FPBDCollisionConstraintBatch::SetThickness(float InThickness)
++{
++    Thickness = FMath::IsFinite(InThickness) ? FMath::Max(InThickness, 0.0f) : 0.0f;
++}
++
++void FPBDCollisionConstraintBatch::Solve(FPBDConstraintContext& Context)
++{
++    for (FPBDParticle& Particle : Context.Particles)
++    {
++        if (!FMath::IsFinite(Particle.InvMass) || Particle.InvMass <= 0.0f)
++        {
++            continue;
++        }
++        for (const FPBDCollider& Collider : Colliders)
++        {
++            float Phi;
++            FVector3f Normal;
++            if (Collider.PhiWithNormal(Particle.PredictedPosition, Phi, Normal) && Phi < Thickness)
++            {
++                Particle.PredictedPosition += (Thickness - Phi) * Normal;
++            }
++        }
++    }
++}
+diff --git a/Source/pdd_cloth/PBDPhysicsAssetAdapter.h b/Source/pdd_cloth/PBDPhysicsAssetAdapter.h
+new file mode 100644
+index 0000000..2b7b169
+--- /dev/null
++++ b/Source/pdd_cloth/PBDPhysicsAssetAdapter.h
+@@ -0,0 +1,42 @@
++#pragma once
++
++#include "PBDCollisionConstraintBatch.h"
++
++class UPhysicsAsset;
++class USkeletalMeshComponent;
++struct FReferenceSkeleton;
++
++struct FPBDPhysicsAssetReport
++{
++    int32 NumColliders = 0;
++    TArray<FString> Issues;
++    bool IsComplete() const { return Issues.IsEmpty(); }
++};
++
++// Read Physics Asset once, update the resulting kinematic geometry each substep.
++// Extraction/component access belongs on the game thread after animation evaluation.
++// No asset pointers are retained. Reinitialize when asset or reference skeleton changes.
++class FPBDPhysicsAssetAdapter
++{
++public:
++    FPBDPhysicsAssetReport Initialize(const UPhysicsAsset* Asset, const FReferenceSkeleton& Skeleton);
++    FPBDPhysicsAssetReport InitializeFromComponent(const USkeletalMeshComponent& Component);
++
++    // Bone transforms are COMPONENT space, indexed by the initialization reference skeleton.
++    // Replaces OutColliders, including on failure, so old collision bodies cannot remain active.
++    // Supports positive uniform scale only. Other scales are explicitly reported and skipped.
++    FPBDPhysicsAssetReport Update(TConstArrayView<FTransform> ComponentSpaceBones,
++        const FTransform& ComponentToWorld, const FTransform& SolverToWorld,
++        TArray<FPBDCollider>& OutColliders) const;
++    FPBDPhysicsAssetReport UpdateFromComponent(const USkeletalMeshComponent& Component,
++        const FTransform& SolverToWorld, TArray<FPBDCollider>& OutColliders) const;
++
++private:
++    struct FBinding
++    {
++        FName BoneName;
++        int32 BoneIndex = INDEX_NONE;
++        FPBDCollider BoneLocalCollider;
++    };
++    TArray<FBinding> Bindings;
++};
+diff --git a/Source/pdd_cloth/PBDPhysicsAssetAdapter.cpp b/Source/pdd_cloth/PBDPhysicsAssetAdapter.cpp
+new file mode 100644
+index 0000000..3e24e2a
+--- /dev/null
++++ b/Source/pdd_cloth/PBDPhysicsAssetAdapter.cpp
+@@ -0,0 +1,156 @@
++#include "PBDPhysicsAssetAdapter.h"
++
++#include "Components/SkeletalMeshComponent.h"
++#include "Engine/SkeletalMesh.h"
++#include "PhysicsEngine/PhysicsAsset.h"
++#include "PhysicsEngine/SkeletalBodySetup.h"
++
++namespace
++{
++bool HasSupportedTransform(const FTransform& Transform)
++{
++    const FVector Scale = Transform.GetScale3D();
++    return !Transform.ContainsNaN() && Transform.GetRotation().IsNormalized() &&
++        Scale.X > UE_SMALL_NUMBER &&
++        FMath::IsNearlyEqual(Scale.X, Scale.Y, 1.e-6) &&
++        FMath::IsNearlyEqual(Scale.X, Scale.Z, 1.e-6);
++}
++}
++
++FPBDPhysicsAssetReport FPBDPhysicsAssetAdapter::Initialize(
++    const UPhysicsAsset* Asset, const FReferenceSkeleton& Skeleton)
++{
++    Bindings.Reset();
++    FPBDPhysicsAssetReport Report;
++    if (!Asset)
++    {
++        Report.Issues.Add(TEXT("No Physics Asset supplied."));
++        return Report;
++    }
++
++    for (const USkeletalBodySetup* Body : Asset->SkeletalBodySetups)
++    {
++        if (!Body)
++        {
++            Report.Issues.Add(TEXT("Null skeletal body setup."));
++            continue;
++        }
++        const int32 BoneIndex = Skeleton.FindBoneIndex(Body->BoneName);
++        if (BoneIndex == INDEX_NONE)
++        {
++            Report.Issues.Add(FString::Printf(TEXT("Missing bone: %s"), *Body->BoneName.ToString()));
++            continue;
++        }
++
++        const auto Add = [&](const FPBDCollider& Collider)
++        {
++            float Phi;
++            FVector3f Normal;
++            if (!Collider.PhiWithNormal(Collider.Center, Phi, Normal))
++            {
++                Report.Issues.Add(FString::Printf(TEXT("Invalid shape on bone: %s"), *Body->BoneName.ToString()));
++                return;
++            }
++            Bindings.Add({Body->BoneName, BoneIndex, Collider});
++        };
++        const FKAggregateGeom& Geometry = Body->AggGeom;
++        for (const FKSphereElem& Sphere : Geometry.SphereElems)
++        {
++            FPBDCollider Collider;
++            Collider.Center = FVector3f(Sphere.Center);
++            Collider.Radius = Sphere.Radius;
++            Add(Collider);
++        }
++        for (const FKSphylElem& Capsule : Geometry.SphylElems)
++        {
++            FPBDCollider Collider;
++            Collider.Shape = EPBDColliderShape::Capsule;
++            Collider.Center = FVector3f(Capsule.Center);
++            Collider.Rotation = FQuat4f(Capsule.Rotation.Quaternion());
++            Collider.Radius = Capsule.Radius;
++            Collider.HalfHeight = Capsule.Length * 0.5f;
++            Add(Collider);
++        }
++        const int32 Unsupported = Geometry.GetElementCount() - Geometry.SphereElems.Num() - Geometry.SphylElems.Num();
++        if (Unsupported > 0)
++        {
++            Report.Issues.Add(FString::Printf(TEXT("Skipped %d unsupported shapes on bone %s (only sphere/sphyl supported)."),
++                Unsupported, *Body->BoneName.ToString()));
++        }
++    }
++    Report.NumColliders = Bindings.Num();
++    return Report;
++}
++
++FPBDPhysicsAssetReport FPBDPhysicsAssetAdapter::InitializeFromComponent(const USkeletalMeshComponent& Component)
++{
++    if (const USkeletalMesh* Mesh = Component.GetSkeletalMeshAsset())
++    {
++        return Initialize(Component.GetPhysicsAsset(), Mesh->GetRefSkeleton());
++    }
++    Bindings.Reset();
++    FPBDPhysicsAssetReport Report;
++    Report.Issues.Add(TEXT("Component has no skeletal mesh."));
++    return Report;
++}
++
++FPBDPhysicsAssetReport FPBDPhysicsAssetAdapter::Update(
++    TConstArrayView<FTransform> ComponentSpaceBones, const FTransform& ComponentToWorld,
++    const FTransform& SolverToWorld, TArray<FPBDCollider>& OutColliders) const
++{
++    OutColliders.Reset();
++    FPBDPhysicsAssetReport Report;
++    if (!HasSupportedTransform(ComponentToWorld) || !HasSupportedTransform(SolverToWorld))
++    {
++        Report.Issues.Add(TEXT("Component and solver transforms require finite, positive uniform scale and unit rotation."));
++        return Report;
++    }
++    OutColliders.Reserve(Bindings.Num());
++    for (const FBinding& Binding : Bindings)
++    {
++        if (!ComponentSpaceBones.IsValidIndex(Binding.BoneIndex) ||
++            !HasSupportedTransform(ComponentSpaceBones[Binding.BoneIndex]))
++        {
++            Report.Issues.Add(FString::Printf(TEXT("Missing pose or unsupported bone transform: %s"), *Binding.BoneName.ToString()));
++            continue;
++        }
++        const FTransform& Bone = ComponentSpaceBones[Binding.BoneIndex];
++        FPBDCollider Collider = Binding.BoneLocalCollider;
++        const FVector WorldCenter = ComponentToWorld.TransformPosition(Bone.TransformPosition(FVector(Collider.Center)));
++        Collider.Center = FVector3f(SolverToWorld.InverseTransformPosition(WorldCenter));
++        Collider.Rotation = FQuat4f(SolverToWorld.GetRotation().Inverse() * ComponentToWorld.GetRotation() *
++            Bone.GetRotation() * FQuat(Collider.Rotation));
++        Collider.Rotation.Normalize();
++        const double Scale = Bone.GetScale3D().X * ComponentToWorld.GetScale3D().X / SolverToWorld.GetScale3D().X;
++        Collider.Radius *= Scale;
++        Collider.HalfHeight *= Scale;
++        float Phi;
++        FVector3f Normal;
++        if (!Collider.PhiWithNormal(Collider.Center, Phi, Normal))
++        {
++            Report.Issues.Add(FString::Printf(TEXT("Transformed collider is not finite/valid: %s"), *Binding.BoneName.ToString()));
++            continue;
++        }
++        OutColliders.Add(Collider);
++    }
++    Report.NumColliders = OutColliders.Num();
++    return Report;
++}
++
++FPBDPhysicsAssetReport FPBDPhysicsAssetAdapter::UpdateFromComponent(
++    const USkeletalMeshComponent& Component, const FTransform& SolverToWorld,
++    TArray<FPBDCollider>& OutColliders) const
++{
++    const USkeletalMesh* Mesh = Component.GetSkeletalMeshAsset();
++    for (const FBinding& Binding : Bindings)
++    {
++        if (!Mesh || Mesh->GetRefSkeleton().FindBoneIndex(Binding.BoneName) != Binding.BoneIndex)
++        {
++            OutColliders.Reset();
++            FPBDPhysicsAssetReport Report;
++            Report.Issues.Add(TEXT("Reference skeleton changed; reinitialize the Physics Asset adapter."));
++            return Report;
++        }
++    }
++    return Update(Component.GetComponentSpaceTransforms(), Component.GetComponentTransform(), SolverToWorld, OutColliders);
++}
+diff --git a/Source/pdd_cloth/Tests/PBDCollisionTests.cpp b/Source/pdd_cloth/Tests/PBDCollisionTests.cpp
+new file mode 100644
+index 0000000..4ed4713
+--- /dev/null
++++ b/Source/pdd_cloth/Tests/PBDCollisionTests.cpp
+@@ -0,0 +1,228 @@
++#if WITH_DEV_AUTOMATION_TESTS
++
++#include "Misc/AutomationTest.h"
++#include "../PBDCollisionConstraintBatch.h"
++#include "../PBDPhysicsAssetAdapter.h"
++#include "../PBDClothSolver.h"
++#include "Chaos/Sphere.h"
++#include "Chaos/Cylinder.h"
++#include "Chaos/Capsule.h"
++#include "PhysicsEngine/PhysicsAsset.h"
++#include "PhysicsEngine/SkeletalBodySetup.h"
++#include "ReferenceSkeleton.h"
++#include <limits>
++
++IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPBDCollisionGeometryTest, "PBD.Collision.GeometryAgainstChaos",
++    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
++
++bool FPBDCollisionGeometryTest::RunTest(const FString& Parameters)
++{
++    const Chaos::FSphere Sphere(Chaos::FVec3(0), 2);
++    const Chaos::FCylinder Cylinder(Chaos::FVec3(0, 0, -3), Chaos::FVec3(0, 0, 3), 2);
++    const Chaos::FCapsule Capsule(Chaos::FVec3(0, 0, -3), Chaos::FVec3(0, 0, 3), 2);
++    const Chaos::FImplicitObject* References[] = { &Sphere, &Cylinder, &Capsule };
++    FRandomStream Random(90210);
++    for (int32 ShapeIndex = 0; ShapeIndex < 3; ++ShapeIndex)
++    {
++        FPBDCollider Collider;
++        Collider.Shape = static_cast<EPBDColliderShape>(ShapeIndex);
++        Collider.Radius = 2;
++        Collider.HalfHeight = 3;
++        Collider.Center = FVector3f(7, -4, 11);
++        Collider.Rotation = FQuat4f(FVector3f(1, 2, 3).GetSafeNormal(), 0.73f);
++        for (int32 Sample = 0; Sample < 256; ++Sample)
++        {
++            const FVector3f Local(Random.FRandRange(-5, 5), Random.FRandRange(-5, 5), Random.FRandRange(-6, 6));
++            const FVector3f Point = Collider.Center + Collider.Rotation.RotateVector(Local);
++            float Phi;
++            FVector3f Normal;
++            TestTrue(TEXT("Finite distance query"), Collider.PhiWithNormal(Point, Phi, Normal));
++            Chaos::FVec3 ReferenceNormal;
++            const double ReferencePhi = References[ShapeIndex]->PhiWithNormal(Chaos::FVec3(Local), ReferenceNormal);
++            TestTrue(TEXT("SDF agrees with Chaos"), FMath::Abs(Phi - ReferencePhi) < 2.e-5);
++            const FVector3f ExpectedNormal = Collider.Rotation.RotateVector(FVector3f(ReferenceNormal));
++            TestTrue(TEXT("Normal agrees with Chaos"), Normal.Equals(ExpectedNormal, 2.e-5f));
++            // Independently check that a signed-distance projection lands on the surface.
++            float SurfacePhi;
++            FVector3f SurfaceNormal;
++            Collider.PhiWithNormal(Point - Phi * Normal, SurfacePhi, SurfaceNormal);
++            TestTrue(TEXT("Projection reaches surface"), FMath::Abs(SurfacePhi) < 2.e-5f);
++        }
++        float Phi;
++        FVector3f Normal;
++        TestTrue(TEXT("Center is handled"), Collider.PhiWithNormal(Collider.Center, Phi, Normal));
++        TestTrue(TEXT("Center fallback is unit"), FMath::IsNearlyEqual(Normal.Size(), 1.0f));
++        TestTrue(TEXT("Center is inside"), Phi < 0);
++    }
++    return true;
++}
++
++IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPBDCollisionProjectionTest, "PBD.Collision.ProjectionAndEdgeCases",
++    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
++
++bool FPBDCollisionProjectionTest::RunTest(const FString& Parameters)
++{
++    for (EPBDColliderShape Shape : {EPBDColliderShape::Sphere, EPBDColliderShape::Cylinder, EPBDColliderShape::Capsule})
++    {
++        FPBDCollider Collider;
++        Collider.Shape = Shape;
++        Collider.Radius = 2;
++        Collider.HalfHeight = 3;
++        FPBDCollisionConstraintBatch Batch;
++        Batch.SetColliders({Collider});
++        Batch.SetThickness(0.5f);
++        TArray<FPBDParticle> Particles;
++        // Center, side, upper cap, lower cap, rounded thickness at rim, exterior, fixed point.
++        for (const FVector3f P : {FVector3f(0), FVector3f(1, 0, 0), FVector3f(0, 0, 2.9f),
++            FVector3f(0, 0, -2.9f), FVector3f(2.1f, 0, 3.1f), FVector3f(8, 0, 0)})
++        {
++            Particles.Emplace(P, 1.0f);
++        }
++        Particles.Emplace(FVector3f(0), 0.0f);
++        FPBDConstraintContext Context;
++        Context.Particles = MakeArrayView(Particles);
++        Context.DeltaTime = 1.0f / 60;
++        Batch.Solve(Context);
++        for (int32 I = 0; I < Particles.Num() - 1; ++I)
++        {
++            float Phi;
++            FVector3f Normal;
++            Collider.PhiWithNormal(Particles[I].PredictedPosition, Phi, Normal);
++            TestTrue(TEXT("All movable particles separated by thickness"), Phi >= 0.5f - 1.e-5f);
++            TestEqual(TEXT("Projection does not commit old position"), Particles[I].Velocity, FVector3f::ZeroVector);
++        }
++        TestEqual(TEXT("Fixed point unchanged"), Particles.Last().PredictedPosition, FVector3f(0));
++        TestEqual(TEXT("Exterior unchanged"), Particles[5].PredictedPosition, FVector3f(8, 0, 0));
++        const FVector3f Projected = Particles[0].PredictedPosition;
++        Batch.Solve(Context);
++        TestTrue(TEXT("Repeated projection is idempotent"), Projected.Equals(Particles[0].PredictedPosition, 1.e-5f));
++    }
++    FPBDCollider Bad;
++    float Phi;
++    FVector3f Normal;
++    Bad.Radius = -1;
++    TestFalse(TEXT("Negative radius rejected"), Bad.PhiWithNormal(FVector3f(0), Phi, Normal));
++    Bad.Radius = 1;
++    Bad.Shape = EPBDColliderShape::Cylinder;
++    TestFalse(TEXT("Zero-height cylinder rejected"), Bad.PhiWithNormal(FVector3f(0), Phi, Normal));
++    Bad.Shape = EPBDColliderShape::Capsule;
++    TestTrue(TEXT("Zero-length capsule is a sphere"), Bad.PhiWithNormal(FVector3f(2, 0, 0), Phi, Normal));
++    TestEqual(TEXT("Zero-length capsule distance"), Phi, 1.0f);
++    TestFalse(TEXT("NaN input rejected"), Bad.PhiWithNormal(FVector3f(std::numeric_limits<float>::quiet_NaN(), 0, 0), Phi, Normal));
++    return true;
++}
++
++IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPBDPhysicsAssetAdapterTest, "PBD.Collision.PhysicsAssetAdapter",
++    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
++
++bool FPBDPhysicsAssetAdapterTest::RunTest(const FString& Parameters)
++{
++    FReferenceSkeleton Skeleton;
++    {
++        // The modifier rebuilds the final bone lookup when its scope ends.
++        FReferenceSkeletonModifier Modifier(Skeleton, nullptr);
++        Modifier.Add(FMeshBoneInfo(TEXT("root"), TEXT("root"), INDEX_NONE), FTransform::Identity);
++        Modifier.Add(FMeshBoneInfo(TEXT("arm"), TEXT("arm"), 0), FTransform::Identity);
++    }
++    UPhysicsAsset* Asset = NewObject<UPhysicsAsset>();
++    USkeletalBodySetup* Body = NewObject<USkeletalBodySetup>(Asset);
++    Body->BoneName = TEXT("arm");
++    FKSphereElem Sphere(2);
++    Sphere.Center = FVector(1, 0, 0);
++    Body->AggGeom.SphereElems.Add(Sphere);
++    FKSphylElem Capsule(1, 6);
++    Capsule.Center = FVector(0, 2, 0);
++    Capsule.Rotation = FRotator(0, 0, 90);
++    Body->AggGeom.SphylElems.Add(Capsule);
++    Asset->SkeletalBodySetups.Add(Body);
++    FPBDPhysicsAssetAdapter Adapter;
++    FPBDPhysicsAssetReport Report = Adapter.Initialize(Asset, Skeleton);
++    TestTrue(TEXT("Supported extraction complete"), Report.IsComplete());
++    TestEqual(TEXT("Two shapes extracted"), Report.NumColliders, 2);
++
++    const FTransform Bone(FQuat(FVector::UpVector, UE_PI / 2), FVector(10, 0, 0), FVector(2));
++    TArray<FTransform> Bones = {FTransform::Identity, Bone};
++    const FTransform Component(FQuat(FVector::UpVector, UE_PI / 2), FVector(100, 200, 0), FVector(3));
++    const FTransform Solver(FQuat::Identity, FVector(100, 200, 0), FVector(2));
++    TArray<FPBDCollider> Colliders;
++    Report = Adapter.Update(Bones, Component, Solver, Colliders);
++    TestTrue(TEXT("Pose conversion complete"), Report.IsComplete());
++    if (!TestEqual(TEXT("Two runtime shapes"), Colliders.Num(), 2)) { return false; }
++    TestTrue(TEXT("Sphere center applies bone/component/solver spaces"), Colliders[0].Center.Equals(FVector3f(-3, 15, 0), 1.e-4f));
++    TestEqual(TEXT("Uniform scale radius"), Colliders[0].Radius, 6.0f);
++    TestTrue(TEXT("Physics Asset sphyl stays capsule"), Colliders[1].Shape == EPBDColliderShape::Capsule);
++    TestEqual(TEXT("Length excludes hemispheres"), Colliders[1].HalfHeight, 9.0f);
++    const FVector ExpectedEndpoint = Solver.InverseTransformPosition(Component.TransformPosition(Bone.TransformPosition(
++        Capsule.Center + Capsule.Rotation.RotateVector(FVector(0, 0, 3)))));
++    const FVector3f ActualEndpoint = Colliders[1].Center + Colliders[1].Rotation.RotateVector(FVector3f(0, 0, 9));
++    TestTrue(TEXT("Capsule orientation/endpoints follow bone"), ActualEndpoint.Equals(FVector3f(ExpectedEndpoint), 1.e-4f));
++    Bones[1].AddToTranslation(FVector(4, 0, 0));
++    Adapter.Update(Bones, Component, Solver, Colliders);
++    TestTrue(TEXT("Next pose moves existing shapes"), Colliders[0].Center.Equals(FVector3f(-3, 21, 0), 1.e-4f));
++
++    Bones[1].SetScale3D(FVector(1, 2, 1));
++    Report = Adapter.Update(Bones, Component, Solver, Colliders);
++    TestFalse(TEXT("Non-uniform bone scale reported"), Report.IsComplete());
++    TestTrue(TEXT("Old colliders cleared on bad pose"), Colliders.IsEmpty());
++    Bones.SetNum(1);
++    Report = Adapter.Update(Bones, Component, Solver, Colliders);
++    TestFalse(TEXT("Missing pose reported"), Report.IsComplete());
++    Report = Adapter.Update(Bones, Component, FTransform(FQuat::Identity, FVector(0), FVector(-1)), Colliders);
++    TestFalse(TEXT("Mirrored solver rejected"), Report.IsComplete());
++
++    Body->AggGeom.BoxElems.Add(FKBoxElem(1, 1, 1));
++    USkeletalBodySetup* Missing = NewObject<USkeletalBodySetup>(Asset);
++    Missing->BoneName = TEXT("missing");
++    Missing->AggGeom.SphereElems.Add(FKSphereElem(1));
++    Asset->SkeletalBodySetups.Add(Missing);
++    Report = Adapter.Initialize(Asset, Skeleton);
++    TestEqual(TEXT("Unsupported shape and missing bone reported"), Report.Issues.Num(), 2);
++    TestEqual(TEXT("Valid shapes retained"), Report.NumColliders, 2);
++    Report = Adapter.Initialize(nullptr, Skeleton);
++    TestFalse(TEXT("Null asset reported"), Report.IsComplete());
++    Adapter.Update({}, FTransform::Identity, FTransform::Identity, Colliders);
++    TestTrue(TEXT("Reinitialization clears old bindings"), Colliders.IsEmpty());
++    return true;
++}
++
++IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPBDCollisionSolverTest, "PBD.Collision.ClothSolverIntegration",
++    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
++
++bool FPBDCollisionSolverTest::RunTest(const FString& Parameters)
++{
++    for (EPBDColliderShape Shape : {EPBDColliderShape::Sphere, EPBDColliderShape::Cylinder})
++    {
++        FPBDClothSolver Solver;
++        Solver.InitializeGrid(8, 8, 2);
++        FPBDCollider Collider;
++        Collider.Shape = Shape;
++        Collider.Center = FVector3f(0, 0, -8);
++        Collider.Radius = 4;
++        Collider.HalfHeight = 2;
++        auto Batch = MakeUnique<FPBDCollisionConstraintBatch>();
++        Batch->SetThickness(0.2f);
++        Batch->SetColliders({Collider});
++        Solver.RegisterConstraintBatch(MoveTemp(Batch));
++        const FVector3f Pin = Solver.GetParticles()[0].Position;
++        for (int32 Step = 0; Step < 120; ++Step)
++        {
++            Solver.Step(1.0f / 120, 8);
++            for (const FPBDParticle& Particle : Solver.GetParticles())
++            {
++                TestFalse(TEXT("Position finite"), Particle.Position.ContainsNaN());
++                TestFalse(TEXT("Velocity finite"), Particle.Velocity.ContainsNaN());
++                if (Particle.InvMass > 0)
++                {
++                    float Phi;
++                    FVector3f Normal;
++                    Collider.PhiWithNormal(Particle.Position, Phi, Normal);
++                    TestTrue(TEXT("Collision remains enforced after internal constraints"), Phi >= 0.2f - 1.e-4f);
++                }
++            }
++        }
++        TestEqual(TEXT("Pinned corner unchanged"), Solver.GetParticles()[0].Position, Pin);
++    }
++    return true;
++}
++
++#endif
+diff --git a/Scripts/test_pbd_collision.py b/Scripts/test_pbd_collision.py
+new file mode 100644
+index 0000000..3a1f46f
+--- /dev/null
++++ b/Scripts/test_pbd_collision.py
+@@ -0,0 +1,49 @@
++"""Build an isolated source snapshot and run real UE automation tests.
++
++The working editor can remain open. No live project DLL, content, or map is modified.
++Usage: python Scripts/test_pbd_collision.py [--engine D:/UE5/UE_5.8]
++"""
++import argparse
++import json
++from pathlib import Path
++import shutil
++import subprocess
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--engine", type=Path, default=Path("D:/UE5/UE_5.8"))
++    args = parser.parse_args()
++    root = Path(__file__).resolve().parents[1]
++    validation = root / "Saved" / "CollisionValidation"
++    validation.mkdir(parents=True, exist_ok=True)
++    shutil.copytree(root / "Source", validation / "Source", dirs_exist_ok=True)
++    project = validation / "pdd_cloth.uproject"
++    shutil.copy2(root / "pdd_cloth.uproject", project)
++    report = validation / "Report"
++    build_log = validation / "Build.log"
++    command = [str(args.engine / "Engine/Build/BatchFiles/Build.bat"),
++               "pdd_clothEditor", "Win64", "Development", f"-Project={project}",
++               "-WaitMutex", "-NoHotReloadFromIDE"]
++    print(f"Building source snapshot; log: {build_log}", flush=True)
++    with build_log.open("w", encoding="utf-8") as output:
++        subprocess.run(command, stdout=output, stderr=subprocess.STDOUT, check=True, timeout=900)
++    # Remove only the previous summary file, so a failed run cannot reuse an old pass.
++    summary_file = report / "index.json"
++    summary_file.unlink(missing_ok=True)
++    run_log = validation / "Automation.log"
++    command = [str(args.engine / "Engine/Binaries/Win64/UnrealEditor-Cmd.exe"), str(project),
++               "-unattended", "-nop4", "-NullRHI", "-nosplash", "-nosound",
++               "-ExecCmds=Automation RunTests PBD.Collision", "-TestExit=Automation Test Queue Empty",
++               f"-ReportExportPath={report}", f"-abslog={run_log}"]
++    print(f"Running PBD.Collision; log: {run_log}", flush=True)
++    with (validation / "Process.log").open("w", encoding="utf-8") as output:
++        subprocess.run(command, stdout=output, stderr=subprocess.STDOUT, check=True, timeout=300)
++    summary = json.loads(summary_file.read_text(encoding="utf-8-sig"))
++    if summary.get("failed", 0) or summary.get("succeeded", 0) != 4:
++        raise RuntimeError(f"Expected four passing tests: {summary_file}")
++    print(f"PASS: {summary['succeeded']} tests; report: {summary_file}", flush=True)
++
++
++if __name__ == "__main__":
++    main()

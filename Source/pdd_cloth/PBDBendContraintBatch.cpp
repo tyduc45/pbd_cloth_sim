@@ -1,19 +1,4 @@
 #include "PBDBendConstraintBatch.h"
-#include "HAL/IConsoleManager.h"
-#include "HAL/PlatformMisc.h"
-
-DEFINE_LOG_CATEGORY_STATIC(LogPBDBendDebug, Log, All);
-
-static TAutoConsoleVariable<int32> CVarPBDBendDebug(
-    TEXT("p.PBD.BendDebug"), 1,
-    TEXT("0: off; 1: first anomaly per batch; 2: every anomaly. Diagnostic only."));
-static TAutoConsoleVariable<float> CVarPBDBendDebugMaxCorrection(
-    TEXT("p.PBD.BendDebugMaxCorrection"), 10.0f,
-    TEXT("Report single-constraint particle corrections larger than this many local cm."));
-static TAutoConsoleVariable<int32> CVarPBDBendDebugBreak(
-    TEXT("p.PBD.BendDebugBreak"), 0,
-    TEXT("Break before an anomalous correction if a debugger is attached."));
-
 
 // Chaos-style division: a near-zero denominator produces zero, not FMath's maximum value.
 template<typename T>
@@ -78,15 +63,6 @@ void FPBDBendConstraintBatch::Solve(
         if (!FMath::IsFinite(A) || !FMath::IsFinite(B) || !FMath::IsFinite(EdgeLength) ||
             A <= UE_SMALL_NUMBER || B <= UE_SMALL_NUMBER || EdgeLength <= UE_SMALL_NUMBER)
         {
-            const int32 DebugMode = CVarPBDBendDebug.GetValueOnGameThread();
-            if (DebugMode > 0 && (DebugMode >= 2 || !bHasReportedDebugAnomaly))
-            {
-                bHasReportedDebugAnomaly = true;
-                UE_LOG(LogPBDBendDebug, Warning,
-                    TEXT("SKIP invalid hinge Iteration=%d Indices=(%d,%d,%d,%d) A=%.9g B=%.9g Edge=%.9g"),
-                    Context.Iteration, Constraint.Particle1, Constraint.Particle2,
-                    Constraint.Particle3, Constraint.Particle4, A, B, EdgeLength);
-            }
             continue;
         }
 
@@ -129,63 +105,6 @@ void FPBDBendConstraintBatch::Solve(
         const FVector3f DeltaP3 = P3.InvMass * DeltaLambda * Grad3;
         const FVector3f DeltaP4 = P4.InvMass * DeltaLambda * Grad4;
 
-        const int32 DebugMode = CVarPBDBendDebug.GetValueOnGameThread();
-        if (DebugMode > 0)
-        {
-            const FVector3f Positions[] = { P1.PredictedPosition, P2.PredictedPosition,
-                P3.PredictedPosition, P4.PredictedPosition };
-            const FVector3f Gradients[] = { Grad1, Grad2, Grad3, Grad4 };
-            const FVector3f Corrections[] = { DeltaP1, DeltaP2, DeltaP3, DeltaP4 };
-            const float InvMasses[] = { P1.InvMass, P2.InvMass, P3.InvMass, P4.InvMass };
-            const int32 Indices[] = { Constraint.Particle1, Constraint.Particle2,
-                Constraint.Particle3, Constraint.Particle4 };
-            const float Scalars[] = { A, B, CosTheta, SinTheta, RawConstraintError, ConstraintError,
-                Constraint.theta, WeightSum, Alpha, Denominator, Constraint.Lambda,
-                DeltaLambda, Constraint.Lambda + DeltaLambda };
-            bool bFinite = true;
-            for (float Value : Scalars)
-            {
-                bFinite &= FMath::IsFinite(Value);
-            }
-            double MaxCorrection = 0.0;
-            for (int32 I = 0; I < 4; ++I)
-            {
-                bFinite &= FMath::IsFinite(InvMasses[I]) && !Positions[I].ContainsNaN()
-                    && !Gradients[I].ContainsNaN() && !Corrections[I].ContainsNaN()
-                    && !(Positions[I] + Corrections[I]).ContainsNaN();
-                // Measure in double so a large finite float vector does not overflow SizeSquared.
-                MaxCorrection = FMath::Max(MaxCorrection, FVector(Corrections[I]).Size());
-            }
-            const float Threshold = CVarPBDBendDebugMaxCorrection.GetValueOnGameThread();
-            if ((!bFinite || MaxCorrection > Threshold) &&
-                (DebugMode >= 2 || !bHasReportedDebugAnomaly))
-            {
-                bHasReportedDebugAnomaly = true;
-                const int32 ConstraintIndex = static_cast<int32>(&Constraint - Constraints.GetData());
-                UE_LOG(LogPBDBendDebug, Warning,
-                    TEXT("BEFORE WRITE Batch=%p Iteration=%d Constraint=%d Dt=%.9g NonFinite=%d MaxDeltaP=%.9g cm Threshold=%.9g"),
-                    static_cast<const void*>(this), Context.Iteration, ConstraintIndex,
-                    Context.DeltaTime, !bFinite, MaxCorrection, Threshold);
-                UE_LOG(LogPBDBendDebug, Warning,
-                    TEXT("A=%.9g B=%.9g Cos=%.9g Sin=%.9g Angle=%.9g RestAngle=%.9g RawC=%.9g C=%.9g WeightSum=%.9g Alpha=%.9g Denom=%.9g LambdaBefore=%.9g DeltaLambda=%.9g"),
-                    A, B, CosTheta, SinTheta, Angle, Constraint.theta,
-                    RawConstraintError, ConstraintError, WeightSum, Alpha, Denominator, Constraint.Lambda, DeltaLambda);
-                for (int32 I = 0; I < 4; ++I)
-                {
-                    UE_LOG(LogPBDBendDebug, Warning,
-                        TEXT("P%d Index=%d InvMass=%.9g Before=(%.9g,%.9g,%.9g) Grad=(%.9g,%.9g,%.9g) DeltaP=(%.9g,%.9g,%.9g) Length=%.9g"),
-                        I + 1, Indices[I], InvMasses[I], Positions[I].X, Positions[I].Y, Positions[I].Z,
-                        Gradients[I].X, Gradients[I].Y, Gradients[I].Z,
-                        Corrections[I].X, Corrections[I].Y, Corrections[I].Z, FVector(Corrections[I]).Size());
-                }
-                if (CVarPBDBendDebugBreak.GetValueOnGameThread() != 0 && FPlatformMisc::IsDebuggerPresent())
-                {
-                    UE_DEBUG_BREAK();
-                }
-            }
-        }
-
-        // Diagnostics do not clamp or skip corrections: preserve the failure for investigation.
         Constraint.Lambda += DeltaLambda;
         P1.PredictedPosition += DeltaP1;
         P2.PredictedPosition += DeltaP2;

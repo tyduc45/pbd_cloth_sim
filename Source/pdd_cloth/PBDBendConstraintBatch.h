@@ -37,7 +37,6 @@ public:
 
 	const TArray<FPBDBendConstraint>& GetConstraints() const;
 private:
-    bool bHasReportedDebugAnomaly = false;
 	TArray<FPBDBendConstraint> Constraints;
 };
 
