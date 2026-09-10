@@ -25,11 +25,8 @@ public:
     // Bone transforms are COMPONENT space, indexed by the initialization reference skeleton.
     // Replaces OutColliders, including on failure, so old collision bodies cannot remain active.
     // Supports positive uniform scale only. Other scales are explicitly reported and skipped.
-    FPBDPhysicsAssetReport Update(TConstArrayView<FTransform> ComponentSpaceBones,
-        const FTransform& ComponentToWorld, const FTransform& SolverToWorld,
-        TArray<FPBDCollider>& OutColliders) const;
-    FPBDPhysicsAssetReport UpdateFromComponent(const USkeletalMeshComponent& Component,
-        const FTransform& SolverToWorld, TArray<FPBDCollider>& OutColliders) const;
+    FPBDPhysicsAssetReport Update(TConstArrayView<FTransform> ComponentSpaceBones, const FTransform& ComponentToWorld, const FTransform& SolverToWorld, TArray<FPBDCollider>& OutColliders) const;
+    FPBDPhysicsAssetReport UpdateFromComponent(const USkeletalMeshComponent& Component, const FTransform& SolverToWorld, TArray<FPBDCollider>& OutColliders) const;
 
 private:
     struct FBinding

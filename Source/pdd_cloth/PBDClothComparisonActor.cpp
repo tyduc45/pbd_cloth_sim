@@ -1,13 +1,22 @@
 #include "PBDClothComparisonActor.h"
 #include "Camera/CameraComponent.h"
 #include "Components/SceneComponent.h"
+#include "Components/InstancedStaticMeshComponent.h"
+#include "UObject/ConstructorHelpers.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/Engine.h"
+#include "Engine/Canvas.h"
+#include "CanvasTypes.h"
+#include "Debug/DebugDrawService.h"
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
 #include "Chaos/PBDSoftsSolverParticles.h"
 #include "Chaos/PBDSpringConstraints.h"
 #include "Chaos/PBDBendingConstraints.h"
+#include "Chaos/PerParticlePBDCollisionConstraint.h"
+#include "Chaos/Sphere.h"
+#include "Chaos/Cylinder.h"
+#include "Chaos/Capsule.h"
 
 class FChaosClothComparisonState
 {
@@ -15,6 +24,39 @@ public:
     Chaos::Softs::FSolverParticles Particles;
     TUniquePtr<Chaos::Softs::FPBDSpringConstraints> Distance;
     TUniquePtr<Chaos::Softs::FPBDBendingConstraints> Bend;
+    Chaos::Softs::FSolverCollisionParticles Bodies;
+    Chaos::TPBDActiveView<Chaos::Softs::FSolverCollisionParticles> BodyView{Bodies};
+    TArray<bool> Collided;
+    TArray<uint32> DynamicGroups, BodyGroups;
+    TArray<float> Thickness{0.5f}, Friction{0.0f};
+
+    void UpdateColliders(const TArray<FPBDCollider>& Colliders, float InThickness)
+    {
+        using namespace Chaos;
+        BodyView.Reset();
+        Bodies.RemoveAt(0, Bodies.Size());
+        Bodies.AddParticles(Colliders.Num());
+        BodyView.AddRange(Colliders.Num());
+        BodyGroups.Init(0, Colliders.Num());
+        Collided.Init(false, Colliders.Num());
+        Thickness[0] = InThickness;
+        for (int32 I = 0; I < Colliders.Num(); ++I)
+        {
+            const FPBDCollider& C = Colliders[I];
+            Bodies.X(I) = C.Center;
+            Bodies.SetR(I, Softs::FSolverRotation3(C.Rotation));
+            Bodies.V(I) = Bodies.W(I) = FVector3f::ZeroVector;
+            const FVec3 A(0, 0, -C.HalfHeight), B(0, 0, C.HalfHeight);
+            FImplicitObjectPtr Geometry;
+            switch (C.Shape)
+            {
+            case EPBDColliderShape::Sphere: Geometry = new Chaos::FSphere(FVec3(0), C.Radius); break;
+            case EPBDColliderShape::Cylinder: Geometry = new FCylinder(A, B, C.Radius); break;
+            case EPBDColliderShape::Capsule: Geometry = new FCapsule(A, B, C.Radius); break;
+            }
+            Bodies.SetGeometry(I, Geometry);
+        }
+    }
 
     void Initialize(const FPBDClothSolver& Source)
     {
@@ -22,6 +64,7 @@ public:
         using namespace Chaos::Softs;
         const TArray<FPBDParticle>& SourceParticles = Source.GetParticles();
         Particles.AddParticles(SourceParticles.Num());
+        DynamicGroups.Init(0, SourceParticles.Num());
         for (int32 I = 0; I < SourceParticles.Num(); ++I)
         {
             const FPBDParticle& P = SourceParticles[I];
@@ -46,7 +89,7 @@ public:
         }
 
         const TConstArrayView<FRealSingle> NoWeights;
-        // Stiffness=1 matches our Compliance=0 projection. No tether, collision,
+        // Stiffness=1 matches our Compliance=0 projection. No tether,
         // damping, aerodynamics, animation drive, or additional material constraints.
         Distance = MakeUnique<FPBDSpringConstraints>(Particles, 0, SourceParticles.Num(),
             Edges, NoWeights, FSolverVec2(1.0f), false, false);
@@ -86,10 +129,13 @@ public:
         Distance->ApplyProperties(Dt, Iterations);
         Bend->ApplyProperties(Dt, Iterations);
         Bend->Init(Particles);
+        Chaos::Softs::FPerParticlePBDCollisionConstraint Collision(
+            BodyView, Collided, DynamicGroups, BodyGroups, Thickness, Friction);
         for (int32 Iteration = 0; Iteration < Iterations; ++Iteration)
         {
             Distance->Apply(Particles, Dt);
             Bend->Apply(Particles, Dt);
+            if (Bodies.Size()) { Collision.ApplyRange(Particles, Dt, 0, Particles.Size()); }
         }
         const float InverseDt = 1.0f / Dt;
         for (int32 I = 0; I < static_cast<int32>(Particles.Size()); ++I)
@@ -115,6 +161,18 @@ APBDClothComparisonActor::APBDClothComparisonActor()
     ComparisonCamera->SetRelativeLocation(FVector(0.0, -650.0, 20.0));
     ComparisonCamera->SetRelativeRotation(FRotator(0.0, 90.0, 0.0));
     ComparisonCamera->FieldOfView = 55.0f;
+    ProjectileSpheres = CreateDefaultSubobject<UInstancedStaticMeshComponent>(TEXT("ProjectileSpheres"));
+    ProjectileCylinders = CreateDefaultSubobject<UInstancedStaticMeshComponent>(TEXT("ProjectileCylinders"));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> SphereMesh(TEXT("/Engine/BasicShapes/Sphere.Sphere"));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> CylinderMesh(TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
+    ProjectileSpheres->SetStaticMesh(SphereMesh.Object);
+    ProjectileCylinders->SetStaticMesh(CylinderMesh.Object);
+    for (UInstancedStaticMeshComponent* Mesh : {ProjectileSpheres.Get(), ProjectileCylinders.Get()})
+    {
+        Mesh->SetupAttachment(RootComponent);
+        Mesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+        Mesh->SetCanEverAffectNavigation(false);
+    }
 }
 
 APBDClothComparisonActor::~APBDClothComparisonActor() = default;
@@ -126,7 +184,42 @@ void APBDClothComparisonActor::BeginPlay()
     if (APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0))
     {
         PC->SetViewTarget(this);
-        PC->SetInputMode(FInputModeGameOnly());
+        FInputModeGameAndUI InputMode;
+        InputMode.SetHideCursorDuringCapture(false);
+        PC->SetInputMode(InputMode);
+        PC->bShowMouseCursor = true;
+        PC->DefaultMouseCursor = EMouseCursor::Crosshairs;
+        PC->CurrentMouseCursor = EMouseCursor::Crosshairs;
+    }
+    CrosshairHandle = UDebugDrawService::Register(TEXT("Game"),
+        FDebugDrawDelegate::CreateUObject(this, &APBDClothComparisonActor::DrawCrosshair));
+}
+
+void APBDClothComparisonActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+    UDebugDrawService::Unregister(CrosshairHandle);
+    Super::EndPlay(EndPlayReason);
+}
+
+void APBDClothComparisonActor::DrawCrosshair(UCanvas* Canvas, APlayerController* PlayerController)
+{
+    APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0);
+    float X, Y;
+    if (!Canvas || !PC || PC->GetViewTarget() != this || !PC->GetMousePosition(X, Y)) { return; }
+    const float DpiScale = Canvas->Canvas ? Canvas->Canvas->GetDPIScale() : 1.0f;
+    X /= DpiScale;
+    Y /= DpiScale;
+    // Draw in viewport pixels as well as requesting a system cross cursor, so custom
+    // Windows cursor themes cannot remove the aiming reticle.
+    for (const FVector2D Axis : {FVector2D(1, 0), FVector2D(0, 1)})
+    {
+        for (float Sign : {-1.0f, 1.0f})
+        {
+            const FVector2D A = FVector2D(X, Y) + Axis * (4 * Sign);
+            const FVector2D B = FVector2D(X, Y) + Axis * (13 * Sign);
+            Canvas->K2_DrawLine(A, B, 4, FLinearColor::Black);
+            Canvas->K2_DrawLine(A, B, 2, FLinearColor::White);
+        }
     }
 }
 
@@ -136,6 +229,15 @@ void APBDClothComparisonActor::ResetComparison()
     NumY = FMath::Clamp(NumY, 2, 64);
     Spacing = FMath::Clamp(Spacing, 0.1f, 1000.0f);
     CustomSolver.InitializeGrid(NumX, NumY, Spacing);
+    auto NewCollision = MakeUnique<FPBDCollisionConstraintBatch>();
+    CollisionBatch = NewCollision.Get();
+    CustomSolver.RegisterConstraintBatch(MoveTemp(NewCollision));
+    Shots.Reset();
+    ProjectileSpheres->ClearInstances();
+    ProjectileCylinders->ClearInstances();
+    ShotRandom.Initialize(RandomSeed);
+    ShotsFired = 0;
+    LastShape = TEXT("none");
     ChaosState = MakePimpl<FChaosClothComparisonState>();
     ChaosState->Initialize(CustomSolver);
     Accumulator = 0.0;
@@ -147,7 +249,7 @@ void APBDClothComparisonActor::ResetComparison()
     const float HalfHeight = (NumY - 1) * Spacing * 0.5f + 50.0f;
     const float CameraDistance = FMath::Max(HalfWidth, HalfHeight * 1.8f) / FMath::Tan(FMath::DegreesToRadians(27.5f)) * 1.15f;
     ComparisonCamera->SetRelativeLocation(FVector(0.0, -CameraDistance, 20.0));
-    UE_LOG(LogTemp, Display, TEXT("[PBDComparison] Reset: %d particles; %d distance; %d bend per side. Custom Compliance=0; Chaos PBD stiffness=1; angle cap=45deg; only these two constraint types."),
+    UE_LOG(LogTemp, Display, TEXT("[PBDComparison] Reset: %d particles; %d distance; %d bend per side. Custom Compliance=0; Chaos stiffness=1; distance/bend/collision; friction=0; CCD off."),
         CustomSolver.GetParticles().Num(), CustomSolver.GetDistanceConstraints().Num(), CustomSolver.GetBendConstraints().Num());
 }
 
@@ -157,6 +259,44 @@ void APBDClothComparisonActor::PushBoth()
     const FVector3f DeltaVelocity(PushVelocity);
     CustomSolver.AddVelocity(DeltaVelocity);
     ChaosState->AddVelocity(DeltaVelocity);
+}
+
+void APBDClothComparisonActor::FireAtLocalTarget(FVector Target, int32 Shape)
+{
+    if (!ChaosState) { ResetComparison(); }
+    if (bInvalidState || Target.ContainsNaN() || Shots.Num() >= 12) { return; }
+    FShot Shot;
+    Shot.Collider.Shape = static_cast<EPBDColliderShape>(Shape >= 0 && Shape <= 2 ? Shape : ShotRandom.RandRange(0, 2));
+    Shot.Collider.Radius = ShotRandom.FRandRange(12.0f, 20.0f);
+    Shot.Collider.HalfHeight = ShotRandom.FRandRange(15.0f, 28.0f);
+    Shot.Collider.Rotation = FQuat4f(FRotator(ShotRandom.FRandRange(-70, 70),
+        ShotRandom.FRandRange(-70, 70), ShotRandom.FRandRange(-70, 70)).Quaternion());
+    Target.Y = 0;
+    // Parallel launch lanes: each visual copy has precisely the same solver-space path.
+    Shot.Collider.Center = FVector3f(Target + FVector(0, -180, 0));
+    const float Speed = FMath::IsFinite(ProjectileSpeed) ? FMath::Clamp(ProjectileSpeed, 30.0f, 600.0f) : 180.0f;
+    Shot.Velocity = FVector3f(0, Speed, 0);
+    Shots.Add(Shot);
+    ++ShotsFired;
+    const TCHAR* Names[] = {TEXT("Sphere"), TEXT("Cylinder"), TEXT("Capsule")};
+    LastShape = Names[static_cast<int32>(Shot.Collider.Shape)];
+}
+
+void APBDClothComparisonActor::FireFromMouse()
+{
+    APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0);
+    FVector Origin, Direction;
+    if (!PC || !PC->DeprojectMousePositionToWorld(Origin, Direction)) { return; }
+    const FTransform Transform = GetActorTransform();
+    Origin = Transform.InverseTransformPosition(Origin);
+    Direction = Transform.InverseTransformVector(Direction);
+    if (FMath::Abs(Direction.Y) < UE_SMALL_NUMBER) { return; }
+    const double T = -Origin.Y / Direction.Y;
+    if (T <= 0) { return; }
+    FVector Target = Origin + Direction * T;
+    const float Offset = bOverlay ? 0.0f : ViewSeparation * 0.5f;
+    Target.X -= Target.X >= 0 ? Offset : -Offset;
+    FireAtLocalTarget(Target);
 }
 
 void APBDClothComparisonActor::StepOnce()
@@ -171,6 +311,18 @@ void APBDClothComparisonActor::StepOnce()
         Acceleration += ForceAcceleration * FMath::Sin(SimulationTime * 2.0 * UE_PI * 0.5);
     }
     CustomSolver.SetGravity(FVector3f(Acceleration));
+    TArray<FPBDCollider> Colliders;
+    for (FShot& Shot : Shots)
+    {
+        Shot.Age += Dt;
+        Shot.Collider.Center += Shot.Velocity * Dt;
+    }
+    Shots.RemoveAll([](const FShot& Shot) { return Shot.Age > 6.0f; });
+    for (const FShot& Shot : Shots) { Colliders.Add(Shot.Collider); }
+    const float ThicknessValue = FMath::IsFinite(CollisionThickness) ? FMath::Max(0.0f, CollisionThickness) : 0.5f;
+    CollisionBatch->SetThickness(ThicknessValue);
+    CollisionBatch->SetColliders(Colliders);
+    ChaosState->UpdateColliders(Colliders, ThicknessValue);
     CustomSolver.Step(Dt, Iterations);
     ChaosState->Step(Dt, Iterations, FVector3f(Acceleration));
     SimulationTime += Dt;
@@ -215,19 +367,33 @@ FString APBDClothComparisonActor::GetComparisonReport() const
     }
     double CustomStretch = 0.0;
     double ChaosStretch = 0.0;
+    float CustomPenetration = 0, ChaosPenetration = 0;
+    for (const FShot& Shot : Shots)
+    {
+        for (int32 I = 0; I < P.Num(); ++I)
+        {
+            if (P[I].InvMass <= 0) { continue; }
+            float Phi; FVector3f Normal;
+            Shot.Collider.PhiWithNormal(P[I].Position, Phi, Normal);
+            CustomPenetration = FMath::Max(CustomPenetration, CollisionBatch->GetThickness() - Phi);
+            Shot.Collider.PhiWithNormal(FVector3f(ChaosState->Particles.X(I)), Phi, Normal);
+            ChaosPenetration = FMath::Max(ChaosPenetration, CollisionBatch->GetThickness() - Phi);
+        }
+    }
     for (const FPBDDistanceConstraint& C : CustomSolver.GetDistanceConstraints())
     {
         const double L = C.RestLength;
         CustomStretch = FMath::Max(CustomStretch, FMath::Abs((FVector(P[C.ParticleA].Position) - FVector(P[C.ParticleB].Position)).Size() / L - 1.0));
         ChaosStretch = FMath::Max(ChaosStretch, FMath::Abs((FVector(ChaosState->Particles.X(C.ParticleA)) - FVector(ChaosState->Particles.X(C.ParticleB))).Size() / L - 1.0));
     }
-    return FString::Printf(TEXT("step=%d t=%.3fs | %s | RMS=%.4f cm max=%.4f cm\nCustom / Chaos: max speed %.2f / %.2f cm/s | edge error %.2f / %.2f %% | pin drift %.6f / %.6f cm\nfinite=%s gravity=%s gust=%s | h=%.6f iterations=%d | particles=%d edges=%d hinges=%d"),
+    return FString::Printf(TEXT("step=%d t=%.3fs | %s | RMS=%.4f cm max=%.4f cm\nCustom / Chaos: max speed %.2f / %.2f cm/s | edge error %.2f / %.2f %% | pin drift %.6f / %.6f cm\nfinite=%s gravity=%s gust=%s | h=%.6f iterations=%d | particles=%d edges=%d hinges=%d\nDistance + Bend + Collision | penetration=%.5f / %.5f cm | active=%d fired=%d last=%s | friction=0 CCD=off"),
         StepCount, SimulationTime, bPaused ? TEXT("PAUSED") : TEXT("RUNNING"),
         FMath::Sqrt(SumSquared / P.Num()), Maximum, CustomSpeed, ChaosSpeed,
         100.0 * CustomStretch, 100.0 * ChaosStretch, CustomPinDrift, ChaosPinDrift,
         bInvalidState ? TEXT("NO") : TEXT("yes"), bGravityEnabled ? TEXT("on") : TEXT("off"),
         bOscillatingForce ? TEXT("on") : TEXT("off"), FMath::Clamp(FixedDeltaTime, 0.001f, 1.0f / 30.0f),
-        FMath::Clamp(SolverIterations, 1, 64), P.Num(), CustomSolver.GetDistanceConstraints().Num(), CustomSolver.GetBendConstraints().Num());
+        FMath::Clamp(SolverIterations, 1, 64), P.Num(), CustomSolver.GetDistanceConstraints().Num(), CustomSolver.GetBendConstraints().Num(),
+        CustomPenetration, ChaosPenetration, Shots.Num(), ShotsFired, *LastShape);
 }
 
 void APBDClothComparisonActor::Tick(float DeltaTime)
@@ -242,6 +408,7 @@ void APBDClothComparisonActor::Tick(float DeltaTime)
         if (PC->WasInputKeyJustPressed(EKeys::G)) { bGravityEnabled = !bGravityEnabled; }
         if (PC->WasInputKeyJustPressed(EKeys::F)) { bOscillatingForce = !bOscillatingForce; }
         if (PC->WasInputKeyJustPressed(EKeys::O)) { bOverlay = !bOverlay; }
+        if (PC->WasInputKeyJustPressed(EKeys::LeftMouseButton)) { FireFromMouse(); }
         if (bPaused && PC->WasInputKeyJustPressed(EKeys::N)) { StepOnce(); }
     }
     if (!bPaused)
@@ -265,9 +432,49 @@ void APBDClothComparisonActor::DrawComparison()
     const FTransform Transform = GetActorTransform();
     const float Offset = bOverlay ? 0.0f : ViewSeparation * 0.5f;
     const FColor Colors[] = { FColor::Cyan, FColor(255, 160, 45) };
+    ProjectileSpheres->ClearInstances();
+    ProjectileCylinders->ClearInstances();
     for (int32 Side = 0; Side < 2; ++Side)
     {
         const FVector Translation(Side == 0 ? Offset : -Offset, 0.0, 0.0);
+        for (const FShot& Shot : Shots)
+        {
+            const FPBDCollider& C = Shot.Collider;
+            const FVector Center = Transform.TransformPosition(FVector(C.Center) + Translation);
+            const FQuat Rotation = Transform.GetRotation() * FQuat(C.Rotation);
+            const float Scale = Transform.GetScale3D().X;
+            const FColor Color = FColor(255, 225, 95);
+            const FVector SphereScale(C.Radius * Scale / 50.0f);
+            if (C.Shape == EPBDColliderShape::Sphere)
+            {
+                ProjectileSpheres->AddInstance(FTransform(Rotation, Center, SphereScale), true);
+            }
+            else
+            {
+                ProjectileCylinders->AddInstance(FTransform(Rotation, Center,
+                    FVector(C.Radius * Scale / 50.0f, C.Radius * Scale / 50.0f, C.HalfHeight * Scale / 50.0f)), true);
+                if (C.Shape == EPBDColliderShape::Capsule)
+                {
+                    const FVector Axis = Rotation.GetAxisZ() * C.HalfHeight * Scale;
+                    ProjectileSpheres->AddInstance(FTransform(Rotation, Center - Axis, SphereScale), true);
+                    ProjectileSpheres->AddInstance(FTransform(Rotation, Center + Axis, SphereScale), true);
+                }
+            }
+            if (C.Shape == EPBDColliderShape::Sphere)
+            {
+                DrawDebugSphere(GetWorld(), Center, C.Radius * Scale, 24, Color, false, 0, 0, 1.5f);
+            }
+            else if (C.Shape == EPBDColliderShape::Capsule)
+            {
+                DrawDebugCapsule(GetWorld(), Center, (C.HalfHeight + C.Radius) * Scale,
+                    C.Radius * Scale, Rotation, Color, false, 0, 0, 1.5f);
+            }
+            else
+            {
+                const FVector Axis = Rotation.GetAxisZ() * C.HalfHeight * Scale;
+                DrawDebugCylinder(GetWorld(), Center - Axis, Center + Axis, C.Radius * Scale, 24, Color, false, 0, 0, 1.5f);
+            }
+        }
         const auto WorldPosition = [&](int32 I)
         {
             const FVector Local = Side == 0 ? FVector(CustomSolver.GetParticles()[I].Position) : FVector(ChaosState->Particles.X(I));
@@ -297,6 +504,6 @@ void APBDClothComparisonActor::DrawComparison()
     {
         const uint64 Key = static_cast<uint64>(GetUniqueID()) << 1;
         GEngine->AddOnScreenDebugMessage(Key, 0.0f, FColor::White,
-            TEXT("Space: push both | F: oscillating force | G: gravity | P: pause | N: step | R: reset | O: overlay\n") + GetComparisonReport());
+            TEXT("LMB: fire paired random shape (aim either cloth) | P: pause | N: step | R: reset | O: overlay\nSpace: push | F: gust | G: gravity | yellow: shared kinematic projectiles\n") + GetComparisonReport());
     }
 }

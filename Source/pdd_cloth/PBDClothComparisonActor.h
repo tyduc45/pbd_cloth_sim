@@ -3,11 +3,14 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "PBDClothSolver.h"
+#include "PBDCollisionConstraintBatch.h"
 #include "Templates/PimplPtr.h"
 #include "PBDClothComparisonActor.generated.h"
 
 class FChaosClothComparisonState;
 class UCameraComponent;
+class UInstancedStaticMeshComponent;
+class UCanvas;
 
 // Two independent particle systems with identical inputs. The reference invokes
 // official Chaos PBD distance/bending classes, not a second copy of our formulas.
@@ -32,6 +35,19 @@ public:
 
     UFUNCTION(BlueprintCallable, Category = "Comparison")
     FString GetComparisonReport() const;
+
+    // Shape: 0 sphere, 1 flat-capped cylinder, 2 capsule; -1 seeded random.
+    UFUNCTION(BlueprintCallable, Category = "Comparison|Launcher")
+    void FireAtLocalTarget(FVector Target, int32 Shape = -1);
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Comparison|Launcher")
+    float ProjectileSpeed = 180.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Comparison|Launcher")
+    float CollisionThickness = 0.5f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Comparison|Launcher")
+    int32 RandomSeed = 90210;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Comparison|Grid", meta = (ClampMin = "2", ClampMax = "64"))
     int32 NumX = 16;
@@ -73,10 +89,31 @@ public:
     UPROPERTY(VisibleAnywhere, Category = "Comparison|View")
     TObjectPtr<UCameraComponent> ComparisonCamera;
 
+    UPROPERTY(VisibleAnywhere, Category = "Comparison|View")
+    TObjectPtr<UInstancedStaticMeshComponent> ProjectileSpheres;
+
+    UPROPERTY(VisibleAnywhere, Category = "Comparison|View")
+    TObjectPtr<UInstancedStaticMeshComponent> ProjectileCylinders;
+
 protected:
     virtual void BeginPlay() override;
+    virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 private:
+    struct FShot
+    {
+        FPBDCollider Collider;
+        FVector3f Velocity;
+        float Age = 0;
+    };
+    void FireFromMouse();
+    void DrawCrosshair(UCanvas* Canvas, APlayerController* PlayerController);
+    FDelegateHandle CrosshairHandle;
+    TArray<FShot> Shots;
+    FRandomStream ShotRandom;
+    FPBDCollisionConstraintBatch* CollisionBatch = nullptr;
+    int32 ShotsFired = 0;
+    FString LastShape = TEXT("none");
     void DrawComparison();
     FPBDClothSolver CustomSolver;
     TPimplPtr<FChaosClothComparisonState> ChaosState;

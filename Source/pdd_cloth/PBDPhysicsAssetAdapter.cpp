@@ -17,8 +17,7 @@ bool HasSupportedTransform(const FTransform& Transform)
 }
 }
 
-FPBDPhysicsAssetReport FPBDPhysicsAssetAdapter::Initialize(
-    const UPhysicsAsset* Asset, const FReferenceSkeleton& Skeleton)
+FPBDPhysicsAssetReport FPBDPhysicsAssetAdapter::Initialize(const UPhysicsAsset* Asset, const FReferenceSkeleton& Skeleton)
 {
     Bindings.Reset();
     FPBDPhysicsAssetReport Report;

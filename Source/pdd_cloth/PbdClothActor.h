@@ -18,26 +18,26 @@ public:
 	APbdClothActor();
 
 protected:
-	//横向例子数量
+	//锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷
 	UPROPERTY(EditAnywhere, Category = "PBD | Grid",
 		meta = (ClampMin = "2" , UIMin = "2" , UIMax = "128"))
 	int32 NumX = 16;
-	// 纵向粒子数量
+	// 锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷
 	UPROPERTY(EditAnywhere, Category = "PBD | Grid",
 		meta = (ClampMin = "2", UIMin = "2", UIMax = "128"))
 	int32 NumY = 16;
 
-	// 相邻粒子距离（cm）
+	// 锟斤拷锟斤拷锟斤拷锟接撅拷锟诫（cm锟斤拷
 	UPROPERTY(EditAnywhere, Category = "PBD | Grid",
 		meta = (ClampMin = "0.1", UIMin = "1.0", UIMax = "100.0"))
 	float Spacing = 10.0f;
 
-	// 每个时间步中投影约束的次数,投影就是算修正的意思
+	// 每锟斤拷时锟戒步锟斤拷投影约锟斤拷锟侥达拷锟斤拷,投影锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷思
 	UPROPERTY(EditAnywhere, Category = "PBD | Simulation",
 		meta = (ClampMin = "1", UIMin = "1", UIMax = "32"))
 	int32 SolverIterations = 8;
 
-	// 模拟使用的固定时间步
+	// 模锟斤拷使锟矫的固讹拷时锟戒步
 	UPROPERTY(EditAnywhere, Category = "PBD | Simulation",
 		meta = (ClampMin = "0.0001"))
 	float FixedDeltaTime = 1.0f / 60.0f;

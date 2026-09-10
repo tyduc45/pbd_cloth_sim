@@ -7,13 +7,13 @@ struct FPBDDistanceConstraint
 	int32 ParticleA = INDEX_NONE;
 	int32 ParticleB = INDEX_NONE;
 	float RestLength = 0.0f;
-	// 0 表示完全刚性；数值越大，约束越柔软。
+	// 0 锟斤拷示锟斤拷全锟斤拷锟皆ｏ拷锟斤拷值越锟斤拷约锟斤拷越锟斤拷锟斤拷锟斤拷
 	float Compliance = 0.0f;
-	// 当前子时间步累计的 XPBD 拉格朗日乘子。
+	// 锟斤拷前锟斤拷时锟戒步锟桔计碉拷 XPBD 锟斤拷锟斤拷锟斤拷锟秸筹拷锟接★拷
 	float Lambda;
 };
 
-// FPBDDistanceConstraint 只保存数据；FPBDDistanceConstraintBatch 负责批量处理数据
+// FPBDDistanceConstraint 只锟斤拷锟斤拷锟斤拷锟捷ｏ拷FPBDDistanceConstraintBatch 锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷
 class FPBDDistanceConstraintBatch final : public IPBDConstraintBatch
 {
 public:

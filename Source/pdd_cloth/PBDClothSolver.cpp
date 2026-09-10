@@ -284,7 +284,7 @@ void FPBDClothSolver::Step(
             MaxParticle, NonFiniteCount, FirstNonFinite);
     };
 
-    Integrate(DeltaTime);
+    Integrate(DeltaTime); // 计算初始预测速度
     if (bDebugStages)
     {
         LogStage(TEXT("Integrate"), INDEX_NONE, false, false);
@@ -299,7 +299,7 @@ void FPBDClothSolver::Step(
     {
         Batch->PreStep(Context);
     }
-    // 进行多次迭代修正，在Integrate（）得出的的基础上（这是方程简化的重要条件）
+    // 进行多次迭代修正，在Integrate（）得出的初始预测速度基础上（这是方程简化的重要条件）
     for (int32 Iteration = 0;
         Iteration < SolverIterations;
         ++Iteration)
